@@ -81,6 +81,17 @@ html {
   grid-column: 1;
   grid-row: 2;
   z-index: 1;
+  touch-action: none;
+}
+
+.canvas-wrap.placing-item,
+.canvas-wrap.placing-label {
+  cursor: crosshair;
+}
+
+.canvas-wrap.placing-item #floor-canvas,
+.canvas-wrap.placing-label #floor-canvas {
+  cursor: crosshair;
 }
 
 .statusbar {
@@ -92,8 +103,16 @@ html {
   gap: 8px;
 }
 
-.statusbar > span:not(.msg):not(.sync-saved) {
+.statusbar > .status-hint-desktop {
   display: none;
+}
+
+.statusbar > .status-hint-mobile {
+  display: inline;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .statusbar .sync-saved {

@@ -643,6 +643,10 @@ body {
   color: var(--text);
 }
 
+.status-hint-mobile {
+  display: none;
+}
+
 /* Toast */
 .toast {
   position: fixed;

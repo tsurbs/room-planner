@@ -14,12 +14,16 @@ const PX_PER_FT = 14;
 const BG_TRACE_ID = 'trace';
 const BG_DEFAULT_OPACITY = 0.5;
 const BG_MAX_PX = 4096;
+const MOBILE_MQ = '(max-width: 768px)';
+const MOBILE_DRAG_THRESHOLD = 8;
 
 const state = {
   layout: createDefaultLayout(),
   mode: 'furnish', // 'furnish' | 'walls'
   selection: [], // { kind: 'item'|'wall'|'label', id }[]
   drag: null,
+  dragPending: null,
+  pinch: null,
   pan: { x: 40, y: 40 },
   zoom: 1,
   history: [],
@@ -28,7 +32,23 @@ const state = {
   catalogQuery: '',
   panels: { left: false, right: false },
   placingLabel: false,
+  placingCatalogType: null,
+  wallDrawTool: false,
+  lastLabelTap: { id: null, t: 0 },
 };
+
+function isMobileTouchUI() {
+  return window.matchMedia(MOBILE_MQ).matches;
+}
+
+function handleMetrics() {
+  const hs = isMobileTouchUI() ? 7 : 5;
+  const hSize = isMobileTouchUI() ? 14 : 10;
+  const wallR = isMobileTouchUI() ? 10 : 6;
+  const rotR = isMobileTouchUI() ? 10 : 6;
+  const rotOff = isMobileTouchUI() ? 18 : 14;
+  return { hs, hSize, wallR, rotR, rotOff };
+}
 
 const $ = (sel) => document.querySelector(sel);
 const canvas = () => $('#floor-canvas');
@@ -320,6 +340,21 @@ function cancelPlacingLabel() {
   state.placingLabel = false;
   $('.canvas-wrap')?.classList.remove('placing-label');
   return true;
+}
+
+function cancelPlacingCatalog() {
+  if (!state.placingCatalogType) return false;
+  state.placingCatalogType = null;
+  $('.canvas-wrap')?.classList.remove('placing-item');
+  return true;
+}
+
+function cancelMobileModes() {
+  const a = cancelPlacingLabel();
+  const b = cancelPlacingCatalog();
+  const hadWallTool = state.wallDrawTool;
+  state.wallDrawTool = false;
+  return a || b || hadWallTool;
 }
 
 function toggleSelection(kind, id) {
@@ -683,6 +718,7 @@ function renderBackgroundLayer(svg) {
       })
     );
     if (!bg.locked) {
+      const { hs, hSize } = handleMetrics();
       [
         { x: p.x, y: p.y, corner: 'nw' },
         { x: p.x + pw, y: p.y, corner: 'ne' },
@@ -691,10 +727,10 @@ function renderBackgroundLayer(svg) {
       ].forEach((h) => {
         gBg.appendChild(
           el('rect', {
-            x: h.x - 5,
-            y: h.y - 5,
-            width: 10,
-            height: 10,
+            x: h.x - hs,
+            y: h.y - hs,
+            width: hSize,
+            height: hSize,
             class: 'resize-handle trace-handle',
             'data-bg-resize': h.corner,
           })
@@ -755,13 +791,14 @@ function render() {
       class: `room-label-group ${sel ? 'selected' : ''}`,
       'data-label-id': r.id,
     });
-    const hitW = Math.max(48, r.name.length * fs * 0.55);
+    const hitPad = isMobileTouchUI() ? 8 : 2;
+    const hitW = Math.max(isMobileTouchUI() ? 56 : 48, r.name.length * fs * 0.55);
     g.appendChild(
       el('rect', {
-        x: p.x - 2,
-        y: p.y - 2,
-        width: hitW,
-        height: fs + 8,
+        x: p.x - hitPad,
+        y: p.y - hitPad,
+        width: hitW + hitPad,
+        height: fs + hitPad * 2 + 4,
         fill: 'transparent',
         class: 'room-label-hit',
         'data-label-id': r.id,
@@ -828,11 +865,12 @@ function render() {
     gWalls.appendChild(line);
 
     if (state.mode === 'walls' && sel) {
+      const { wallR } = handleMetrics();
       [p1, p2].forEach((p, idx) => {
         const h = el('circle', {
           cx: p.x,
           cy: p.y,
-          r: 6,
+          r: wallR,
           class: 'wall-endpoint-handle',
           'data-wall-id': w.id,
           'data-endpoint': idx === 0 ? 'start' : 'end',
@@ -923,6 +961,7 @@ function render() {
           'pointer-events': 'none',
         })
       );
+      const { hs, hSize, rotR, rotOff } = handleMetrics();
       const handles = [
         { x: 0, y: 0, corner: 'nw' },
         { x: pw, y: 0, corner: 'ne' },
@@ -932,10 +971,10 @@ function render() {
       handles.forEach((h) => {
         g.appendChild(
           el('rect', {
-            x: h.x - 5,
-            y: h.y - 5,
-            width: 10,
-            height: 10,
+            x: h.x - hs,
+            y: h.y - hs,
+            width: hSize,
+            height: hSize,
             class: 'resize-handle',
             'data-resize': h.corner,
           })
@@ -944,8 +983,8 @@ function render() {
       g.appendChild(
         el('circle', {
           cx: pw / 2,
-          cy: -14,
-          r: 6,
+          cy: -rotOff,
+          r: rotR,
           class: 'rotate-handle',
           'data-rotate': '1',
         })
@@ -1168,6 +1207,197 @@ function renderProperties() {
 }
 
 /* —— Pointer interaction —— */
+const IMMEDIATE_DRAG_TYPES = new Set([
+  'resize',
+  'bg-resize',
+  'rotate-drag',
+  'wall-endpoint',
+  'wall-draw',
+]);
+
+function clientToSvg(clientX, clientY) {
+  const svg = canvas();
+  const pt = svg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+function assignDrag(drag, evt) {
+  const svg = canvas();
+  if (!svg) return;
+  const immediate = !isMobileTouchUI() || IMMEDIATE_DRAG_TYPES.has(drag.type);
+  if (immediate) {
+    state.dragPending = null;
+    state.drag = drag;
+  } else {
+    state.drag = null;
+    state.dragPending = {
+      ...drag,
+      clientX: evt.clientX,
+      clientY: evt.clientY,
+      pointerId: evt.pointerId,
+    };
+  }
+  svg.setPointerCapture(evt.pointerId);
+  if (drag.type === 'pan') updatePanCursor();
+}
+
+function promotePendingDrag(evt) {
+  if (!state.dragPending || state.drag) return false;
+  const dx = evt.clientX - state.dragPending.clientX;
+  const dy = evt.clientY - state.dragPending.clientY;
+  if (Math.hypot(dx, dy) < MOBILE_DRAG_THRESHOLD) return false;
+  const { clientX, clientY, pointerId, ...drag } = state.dragPending;
+  state.drag = drag;
+  state.dragPending = null;
+  if (drag.type === 'pan') updatePanCursor();
+  return true;
+}
+
+function revertPendingDrag() {
+  const p = state.dragPending;
+  if (!p) return;
+  if (p.type === 'item-move' && p.origins) {
+    Object.entries(p.origins).forEach(([id, orig]) => {
+      const item = getItem(id);
+      if (item) {
+        item.x = orig.x;
+        item.y = orig.y;
+      }
+    });
+    render();
+  } else if (p.type === 'item-move' && p.orig) {
+    const item = getItem(p.id);
+    if (item) {
+      item.x = p.orig.x;
+      item.y = p.orig.y;
+      render();
+    }
+  } else if (p.type === 'label-move' && p.orig) {
+    const lbl = getRoomLabel(p.id);
+    if (lbl) {
+      lbl.x = p.orig.x;
+      lbl.y = p.orig.y;
+      render();
+    }
+  }
+  state.dragPending = null;
+}
+
+function handleMobileTap(evt) {
+  const pt = getSvgPoint(evt);
+  const hit = hitTest(evt);
+
+  if (state.placingCatalogType && state.mode === 'furnish' && !hit) {
+    const cat = CATALOG[state.placingCatalogType];
+    const w = screenToWorld(pt.x, pt.y);
+    addItem(
+      state.placingCatalogType,
+      w.x - (cat?.w || 2) / 2,
+      w.y - (cat?.h || 2) / 2
+    );
+    cancelPlacingCatalog();
+    return;
+  }
+
+  if (state.placingLabel && state.mode === 'furnish' && !hit) {
+    const w = screenToWorld(pt.x, pt.y);
+    addRoomLabel(w.x, w.y);
+    cancelPlacingLabel();
+    return;
+  }
+
+  if (hit?.kind === 'label') {
+    const now = Date.now();
+    if (state.lastLabelTap.id === hit.id && now - state.lastLabelTap.t < 400) {
+      selectOne('label', hit.id);
+      focusLabelNameField();
+      state.lastLabelTap = { id: null, t: 0 };
+      return;
+    }
+    state.lastLabelTap = { id: hit.id, t: now };
+    if (!isSelected('label', hit.id)) selectOne('label', hit.id);
+    return;
+  }
+
+  state.lastLabelTap = { id: null, t: 0 };
+
+  if (hit?.kind === 'item' && !isSelected('item', hit.id)) {
+    selectHit(hit, false);
+    return;
+  }
+
+  if (!hit) clearSelection();
+}
+
+function touchMidAndDist(touches) {
+  const a = touches[0];
+  const b = touches[1];
+  return {
+    mid: { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 },
+    dist: Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY),
+  };
+}
+
+function applyPinchFrame(mid, dist) {
+  const p = state.pinch;
+  if (!p || dist < 1) return;
+  const newZoom = Math.min(2.5, Math.max(0.4, p.startZoom * (dist / p.startDist)));
+  state.pan.x = p.startPan.x + (mid.x - p.startMid.x);
+  state.pan.y = p.startPan.y + (mid.y - p.startMid.y);
+  state.zoom = newZoom;
+  const svgPt = clientToSvg(mid.x, mid.y);
+  const world = screenToWorld(svgPt.x, svgPt.y);
+  state.pan.x = svgPt.x - ftToPx(world.x);
+  state.pan.y = svgPt.y - ftToPx(world.y);
+  render();
+}
+
+function beginPinchGesture(touches) {
+  if (state.drag) {
+    state.drag = null;
+    updatePanCursor();
+  }
+  revertPendingDrag();
+  const { mid, dist } = touchMidAndDist(touches);
+  state.pinch = {
+    startDist: dist,
+    startMid: { ...mid },
+    startZoom: state.zoom,
+    startPan: { ...state.pan },
+  };
+}
+
+function onTouchStart(e) {
+  if (!isMobileTouchUI()) return;
+  if (e.touches.length >= 2) {
+    e.preventDefault();
+    beginPinchGesture(e.touches);
+  }
+}
+
+function onTouchMove(e) {
+  if (!isMobileTouchUI() || !state.pinch || e.touches.length < 2) return;
+  e.preventDefault();
+  const { mid, dist } = touchMidAndDist(e.touches);
+  applyPinchFrame(mid, dist);
+}
+
+function onTouchEnd(e) {
+  if (!isMobileTouchUI()) return;
+  if (e.touches.length < 2) state.pinch = null;
+}
+
+function bindMobileTouch() {
+  const wrap = $('.canvas-wrap');
+  if (!wrap) return;
+  wrap.addEventListener('touchstart', onTouchStart, { passive: false });
+  wrap.addEventListener('touchmove', onTouchMove, { passive: false });
+  wrap.addEventListener('touchend', onTouchEnd);
+  wrap.addEventListener('touchcancel', onTouchEnd);
+}
+
 function getSvgPoint(evt) {
   const svg = canvas();
   const pt = svg.createSVGPoint();
@@ -1202,6 +1432,9 @@ function hitTest(evt) {
 }
 
 function shouldPan(evt) {
+  if (isMobileTouchUI()) {
+    return evt.button === 1 || state.spaceHeld || evt.altKey;
+  }
   return (
     evt.button === 1 ||
     state.spaceHeld ||
@@ -1211,10 +1444,7 @@ function shouldPan(evt) {
 }
 
 function startPan(evt) {
-  const svg = canvas();
-  svg.setPointerCapture(evt.pointerId);
-  state.drag = { type: 'pan', start: getSvgPoint(evt), origPan: { ...state.pan } };
-  updatePanCursor();
+  assignDrag({ type: 'pan', start: getSvgPoint(evt), origPan: { ...state.pan } }, evt);
 }
 
 function onPointerDown(evt) {
@@ -1232,22 +1462,25 @@ function onPointerDown(evt) {
   }
 
   if (evt.button !== 0) return;
-  svg.setPointerCapture(evt.pointerId);
+  if (state.pinch) return;
 
   if (state.mode === 'walls') {
     if (hit?.kind === 'wall') {
       selectHit(hit, evt.shiftKey);
       const w = getWall(hit.id);
-      state.drag = {
-        type: hit.endpoint ? 'wall-endpoint' : 'wall-move',
-        id: hit.id,
-        endpoint: hit.endpoint,
-        start: pt,
-        orig: cloneLayout(w),
-      };
+      assignDrag(
+        {
+          type: hit.endpoint ? 'wall-endpoint' : 'wall-move',
+          id: hit.id,
+          endpoint: hit.endpoint,
+          start: pt,
+          orig: cloneLayout(w),
+        },
+        evt
+      );
       return;
     }
-    if (evt.shiftKey) {
+    if (evt.shiftKey || (isMobileTouchUI() && state.wallDrawTool)) {
       const w = screenToWorld(pt.x, pt.y);
       const wall = {
         id: uid('wall'),
@@ -1258,7 +1491,7 @@ function onPointerDown(evt) {
       };
       state.layout.walls.push(wall);
       selectOne('wall', wall.id);
-      state.drag = { type: 'wall-draw', id: wall.id, start: pt };
+      assignDrag({ type: 'wall-draw', id: wall.id, start: pt }, evt);
       return;
     }
     clearSelection();
@@ -1267,6 +1500,9 @@ function onPointerDown(evt) {
   }
 
   if (state.mode === 'furnish') {
+    if (state.placingCatalogType && !hit) {
+      return;
+    }
     if (hit?.kind === 'background') {
       const bg = getBackgroundImage();
       if (!bg) return;
@@ -1276,36 +1512,36 @@ function onPointerDown(evt) {
       }
       if (!isSelected('background', BG_TRACE_ID)) selectOne('background', BG_TRACE_ID);
       if (hit.resize && !bg.locked) {
-        state.drag = {
-          type: 'bg-resize',
-          corner: hit.resize,
-          start: pt,
-          orig: { x: bg.x, y: bg.y, w: bg.width, h: bg.height },
-          aspect: bg.width / bg.height,
-        };
+        assignDrag(
+          {
+            type: 'bg-resize',
+            corner: hit.resize,
+            start: pt,
+            orig: { x: bg.x, y: bg.y, w: bg.width, h: bg.height },
+            aspect: bg.width / bg.height,
+          },
+          evt
+        );
       } else if (!bg.locked) {
-        state.drag = {
-          type: 'bg-move',
-          start: pt,
-          orig: { x: bg.x, y: bg.y },
-        };
+        assignDrag({ type: 'bg-move', start: pt, orig: { x: bg.x, y: bg.y } }, evt);
       }
       return;
     }
     if (hit?.kind === 'label') {
+      cancelPlacingCatalog();
       cancelPlacingLabel();
-      if (!isSelected('label', hit.id)) selectHit(hit, evt.shiftKey);
-      else if (evt.shiftKey) selectHit(hit, true);
+      if (!isMobileTouchUI()) {
+        if (!isSelected('label', hit.id)) selectHit(hit, evt.shiftKey);
+        else if (evt.shiftKey) selectHit(hit, true);
+      }
       const lbl = getRoomLabel(hit.id);
-      state.drag = {
-        type: 'label-move',
-        id: hit.id,
-        start: pt,
-        orig: { x: lbl.x, y: lbl.y },
-      };
+      assignDrag(
+        { type: 'label-move', id: hit.id, start: pt, orig: { x: lbl.x, y: lbl.y } },
+        evt
+      );
       return;
     }
-    if (state.placingLabel) {
+    if (state.placingLabel && !isMobileTouchUI()) {
       const w = screenToWorld(pt.x, pt.y);
       addRoomLabel(w.x, w.y);
       cancelPlacingLabel();
@@ -1322,38 +1558,49 @@ function onPointerDown(evt) {
         };
         state.layout.items.push(copy);
         selectOne('item', copy.id);
-        state.drag = {
-          type: 'item-move',
-          id: copy.id,
-          start: pt,
-          orig: { x: copy.x, y: copy.y },
-          duplicated: true,
-        };
+        assignDrag(
+          {
+            type: 'item-move',
+            id: copy.id,
+            start: pt,
+            orig: { x: copy.x, y: copy.y },
+            duplicated: true,
+          },
+          evt
+        );
         return;
       }
-      if (!isSelected('item', hit.id)) selectHit(hit, evt.shiftKey);
-      else if (evt.shiftKey) selectHit(hit, true);
+      if (!isMobileTouchUI()) {
+        if (!isSelected('item', hit.id)) selectHit(hit, evt.shiftKey);
+        else if (evt.shiftKey) selectHit(hit, true);
+      }
 
       const target = getItem(hit.id);
       if (hit.resize) {
-        state.drag = {
-          type: 'resize',
-          id: hit.id,
-          corner: hit.resize,
-          start: pt,
-          orig: { x: target.x, y: target.y, w: target.w, h: target.h },
-          aspect: target.w / target.h,
-        };
+        assignDrag(
+          {
+            type: 'resize',
+            id: hit.id,
+            corner: hit.resize,
+            start: pt,
+            orig: { x: target.x, y: target.y, w: target.w, h: target.h },
+            aspect: target.w / target.h,
+          },
+          evt
+        );
       } else if (hit.rotate) {
         const cx = target.x + target.w / 2;
         const cy = target.y + target.h / 2;
         const world = screenToWorld(pt.x, pt.y);
-        state.drag = {
-          type: 'rotate-drag',
-          id: hit.id,
-          startAngle: Math.atan2(world.y - cy, world.x - cx),
-          origRot: target.rotation || 0,
-        };
+        assignDrag(
+          {
+            type: 'rotate-drag',
+            id: hit.id,
+            startAngle: Math.atan2(world.y - cy, world.x - cx),
+            origRot: target.rotation || 0,
+          },
+          evt
+        );
       } else {
         const origins = {};
         state.selection
@@ -1362,13 +1609,19 @@ function onPointerDown(evt) {
             const it = getItem(s.id);
             if (it) origins[s.id] = { x: it.x, y: it.y };
           });
-        state.drag = {
-          type: 'item-move',
-          id: hit.id,
-          start: pt,
-          orig: { x: target.x, y: target.y },
-          origins,
-        };
+        if (isMobileTouchUI() && !isSelected('item', hit.id)) {
+          selectOne('item', hit.id);
+        }
+        assignDrag(
+          {
+            type: 'item-move',
+            id: hit.id,
+            start: pt,
+            orig: { x: target.x, y: target.y },
+            origins,
+          },
+          evt
+        );
       }
       return;
     }
@@ -1416,9 +1669,15 @@ function applyResize(item, corner, dxf, dyf, lockAspect, evt) {
 }
 
 function onPointerMove(evt) {
+  if (state.pinch) return;
+
   const pt0 = getSvgPoint(evt);
   const w0 = screenToWorld(pt0.x, pt0.y);
   sync.presenceTick(w0.x, w0.y);
+
+  if (state.dragPending && !state.drag) {
+    promotePendingDrag(evt);
+  }
 
   if (!state.drag) {
     updateWallHoverFromPointer(evt);
@@ -1550,6 +1809,17 @@ function onPointerMove(evt) {
 }
 
 function onPointerUp(evt) {
+  if (state.pinch) return;
+
+  if (state.dragPending && !state.drag) {
+    if (isMobileTouchUI()) handleMobileTap(evt);
+    revertPendingDrag();
+    try {
+      canvas()?.releasePointerCapture(evt.pointerId);
+    } catch (_) {}
+    return;
+  }
+
   if (state.drag) {
     const historyTypes = [
       'item-move',
@@ -1651,7 +1921,7 @@ function onLabelDblClick(evt) {
 /* —— Mode & UI —— */
 function setMode(mode) {
   state.mode = mode;
-  cancelPlacingLabel();
+  cancelMobileModes();
   document.querySelectorAll('[data-mode]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.mode === mode);
   });
@@ -1680,7 +1950,7 @@ function buildCatalog() {
     const buttons = items
       .map(
         ([type, v]) => `
-      <button type="button" class="catalog-item" draggable="true" data-type="${type}" data-label="${v.label}">
+      <button type="button" class="catalog-item" draggable="${isMobileTouchUI() ? 'false' : 'true'}" data-type="${type}" data-label="${v.label}">
         <span class="thumb ${v.round ? 'round' : ''}" style="width:${Math.min(28, v.w * 4)}px;height:${Math.min(20, v.h * 4)}px"></span>
         <span><span>${v.label}</span><br><span class="dims">${v.w}′×${v.h}′</span></span>
       </button>`
@@ -1697,6 +1967,13 @@ function buildCatalog() {
     btn.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('application/x-item-type', btn.dataset.type);
       e.dataTransfer.effectAllowed = 'copy';
+    });
+    btn.addEventListener('click', () => {
+      if (!isMobileTouchUI()) return;
+      cancelPlacingLabel();
+      state.placingCatalogType = btn.dataset.type;
+      $('.canvas-wrap')?.classList.add('placing-item');
+      toast(`Tap the floor to place ${btn.dataset.label}`);
     });
   });
 }
@@ -1722,7 +1999,7 @@ function bindHotkeys() {
     else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
     else if (e.key === 'r' || e.key === 'R') rotateSelected(90);
     else if (e.key === 'Escape') {
-      if (!cancelPlacingLabel()) clearSelection();
+      if (!cancelMobileModes()) clearSelection();
     }
     else if (e.key === 'd' && mod) {
       e.preventDefault();
@@ -1811,13 +2088,19 @@ function bindUI() {
   $('#btn-clear')?.addEventListener('click', clearFloorplan);
   $('#btn-add-wall')?.addEventListener('click', () => {
     setMode('walls');
-    toast('Shift+drag on canvas to draw a new wall');
+    if (isMobileTouchUI()) {
+      state.wallDrawTool = true;
+      toast('Drag on the canvas to draw a wall');
+    } else {
+      toast('Shift+drag on canvas to draw a new wall');
+    }
   });
   $('#btn-add-label')?.addEventListener('click', () => {
     setMode('furnish');
+    cancelPlacingCatalog();
     state.placingLabel = true;
     $('.canvas-wrap')?.classList.add('placing-label');
-    toast('Click the canvas to place a label');
+    toast(isMobileTouchUI() ? 'Tap the canvas to place a label' : 'Click the canvas to place a label');
   });
   $('#btn-trace-image')?.addEventListener('click', () => {
     setMode('furnish');
@@ -1892,6 +2175,7 @@ function bindUI() {
   wrap?.addEventListener('pointerleave', hideWallLengthTip);
   wrap?.addEventListener('pointerup', onPointerUp);
   wrap?.addEventListener('pointercancel', onPointerUp);
+  bindMobileTouch();
   svg?.addEventListener('contextmenu', (e) => e.preventDefault());
   svg?.addEventListener('auxclick', (e) => e.preventDefault());
   svg?.addEventListener('wheel', onWheel, { passive: false });
