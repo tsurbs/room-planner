@@ -1,0 +1,8 @@
+{
+  "name": "room-planner-party",
+  "main": "party/plan-room.ts",
+  "compatibilityDate": "2025-01-01",
+  "parties": {
+    "plan": "party/plan-room.ts"
+  }
+}

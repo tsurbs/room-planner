@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- PartyKit WebSocket base URL (scheme + host + optional port). Empty = no multiplayer WS (plan still loads from KV). Example dev: ws://127.0.0.1:1999 -->
+  <meta name="room-planner-partykit" content="">
+  <title>Room Planner</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header class="toolbar">
+      <div class="toolbar-inner">
+      <span class="brand" title="Room Planner">Room Planner</span>
+      <span class="sep sep-brand"></span>
+      <div class="toolbar-group toolbar-group--sync">
+        <button type="button" class="btn toolbar-compact-text" id="btn-share" title="Create share link (cloud snapshot + live cursors)">
+          <span class="btn-label-full">Share</span>
+          <span class="btn-label-short" aria-hidden="true">⎘</span>
+        </button>
+        <span class="sync-badge" id="sync-badge" title="Sync status">Local</span>
+        <label class="sync-name-label" title="Nickname shown to collaborators">
+          <span class="sync-name-hint">Name</span>
+          <input type="text" id="sync-display-name" class="sync-display-name" maxlength="32" placeholder="Guest" autocomplete="nickname">
+        </label>
+      </div>
+      <span class="sep sep-sync"></span>
+      <div class="toolbar-group toolbar-group--modes">
+        <button type="button" class="btn active" id="btn-mode-furnish" data-mode="furnish" title="Furnish (V)">
+          <span class="btn-label-full">Furnish</span>
+          <span class="btn-label-short" aria-hidden="true">Furn.</span>
+        </button>
+        <button type="button" class="btn" id="btn-mode-walls" data-mode="walls" title="Edit floorplan (E)">
+          <span class="btn-label-full">Edit floorplan</span>
+          <span class="btn-label-short" aria-hidden="true">Floor</span>
+        </button>
+        <button type="button" class="btn icon toolbar-compact-text" id="btn-add-wall" title="Draw wall — Shift+drag in edit mode">
+          <span class="btn-label-full">+ Wall</span>
+          <span class="btn-label-short" aria-hidden="true">+</span>
+        </button>
+        <button type="button" class="btn icon toolbar-compact-text" id="btn-add-label" title="Add room label — click canvas (furnish mode)">
+          <span class="btn-label-full">+ Label</span>
+          <span class="btn-label-short" aria-hidden="true">L</span>
+        </button>
+        <button type="button" class="btn icon toolbar-compact-text" id="btn-trace-image" title="Trace image — upload PNG/JPG or paste from clipboard">
+          <span class="btn-label-full">Trace image</span>
+          <span class="btn-label-short" aria-hidden="true">Img</span>
+        </button>
+        <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
+      </div>
+      <span class="sep sep-modes"></span>
+      <div class="toolbar-group toolbar-group--panels">
+        <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-left" title="Toggle catalog ({)" aria-pressed="false" aria-controls="panel-left">◧</button>
+        <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-right" title="Toggle properties (})" aria-pressed="false" aria-controls="panel-right">◨</button>
+      </div>
+      <span class="sep sep-panels"></span>
+      <div class="toolbar-group toolbar-group--history">
+        <button type="button" class="btn icon" id="btn-undo" title="Undo (⌘Z)" disabled>↶</button>
+        <button type="button" class="btn icon" id="btn-redo" title="Redo (⌘⇧Z)" disabled>↷</button>
+      </div>
+      <span class="sep sep-file"></span>
+      </div>
+      <div class="toolbar-more" id="toolbar-more">
+        <button
+          type="button"
+          class="btn icon toolbar-more-trigger"
+          id="btn-toolbar-more"
+          aria-expanded="false"
+          aria-haspopup="menu"
+          aria-controls="toolbar-more-menu"
+          title="More actions"
+        >⋯</button>
+        <div class="toolbar-more-menu" id="toolbar-more-menu" role="menu">
+          <button type="button" class="btn" id="btn-save" role="menuitem" title="Save (⌘S)">Save</button>
+          <input type="text" id="save-name" class="toolbar-save-name" value="autosave" title="Save slot name" aria-label="Save slot name">
+          <button type="button" class="btn" id="btn-export" role="menuitem" title="Export JSON">Export</button>
+          <button type="button" class="btn" id="btn-import" role="menuitem">Import</button>
+          <button type="button" class="btn toolbar-compact-text" id="btn-clear" role="menuitem" title="Clear floorplan — empty canvas (⌘⇧N)">
+            <span class="btn-label-full">Clear floorplan</span>
+            <span class="btn-label-short" aria-hidden="true">Clear</span>
+          </button>
+          <button type="button" class="btn" id="btn-reset" role="menuitem" title="Restore default 2BR apartment reference layout">Reset</button>
+        </div>
+      </div>
+      <span class="spacer"></span>
+      <span class="hint">V furnish · E walls · Trace image · ⌫ delete</span>
+    </header>
+
+    <aside class="panel panel-left" id="panel-left">
+      <button type="button" class="panel-toggle" id="panel-toggle-left" title="Toggle catalog ({)" aria-label="Toggle catalog" aria-expanded="true">
+        <span class="panel-toggle-icon" aria-hidden="true">‹</span>
+      </button>
+      <div class="panel-body">
+      <h2>Catalog</h2>
+      <div class="panel-search">
+        <input type="search" id="catalog-search" placeholder="Search furniture…" autocomplete="off" aria-label="Search catalog">
+      </div>
+      <p class="panel-hint">Drag items onto the floor</p>
+      <div id="catalog-list" class="panel-section panel-scroll"></div>
+
+      <h2>Saved layouts</h2>
+      <div id="save-panel" class="panel-section panel-scroll">
+        <p class="empty-state save-hint">Click a save below to load. Use Save in the toolbar to write the current slot.</p>
+        <div id="save-list"></div>
+      </div>
+      </div>
+    </aside>
+
+    <main class="canvas-wrap">
+      <svg id="floor-canvas" xmlns="http://www.w3.org/2000/svg" aria-label="Floor plan canvas"></svg>
+    </main>
+
+    <aside class="panel panel-right" id="panel-right">
+      <button type="button" class="panel-toggle" id="panel-toggle-right" title="Toggle properties (})" aria-label="Toggle properties" aria-expanded="true">
+        <span class="panel-toggle-icon" aria-hidden="true">›</span>
+      </button>
+      <div class="panel-body">
+      <h2
+        hx-get="/"
+        hx-select="#tpl-props-header"
+        hx-target="#props-header"
+        hx-swap="innerHTML"
+      >Properties</h2>
+      <div id="props-header"></div>
+      <div id="props-panel" class="panel-section panel-scroll">
+        <p class="empty-state">Select furniture, a wall, or a room label. Double-click a label to edit text.</p>
+      </div>
+
+      <h2
+        hx-get="/"
+        hx-select="#tpl-help"
+        hx-target="#help-panel"
+        hx-swap="innerHTML"
+      >Shortcuts</h2>
+      <div id="help-panel" class="panel-section panel-scroll"></div>
+      </div>
+    </aside>
+
+    <footer class="statusbar">
+      <span class="msg" id="status-msg">Ready</span>
+      <span class="sync-saved" id="sync-saved" title="Last cloud snapshot"></span>
+      <span>Scroll zoom · Space/middle-drag pan</span>
+    </footer>
+  </div>
+
+  <div id="wall-length-tip" class="wall-length-tip hidden" aria-hidden="true"></div>
+
+  <div id="toast" class="toast" role="status"></div>
+
+  <!-- Import modal -->
+  <div id="modal-import" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3>Import layout JSON</h3>
+      <p style="margin:0;font-size:12px;color:var(--muted)">Paste a layout exported from this app or shared with you.</p>
+      <textarea id="import-text" placeholder='{ "version": 1, "walls": [...], "items": [...] }'></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="import-cancel">Cancel</button>
+        <button type="button" class="btn primary" id="import-confirm">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export modal -->
+  <div id="modal-export" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3>Export layout JSON</h3>
+      <p style="margin:0;font-size:12px;color:var(--muted)">Portable representation — copy or save this file anywhere.</p>
+      <textarea id="export-text" readonly></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="export-copy">Copy</button>
+        <button type="button" class="btn primary" id="export-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- HTMX inline templates (no API) -->
+  <div class="template-store">
+    <div id="tpl-props-header"></div>
+    <div id="tpl-help">
+      <ul style="margin:0;padding:8px 12px 12px 24px;font-size:12px;color:var(--muted);line-height:1.7">
+        <li><strong>V</strong> — Furnish mode</li>
+        <li><strong>E</strong> — Edit floorplan</li>
+        <li><strong>Shift+drag</strong> — Draw wall (edit mode)</li>
+        <li><strong>Click label</strong> — Select; edit text, position, size in Properties (furnish mode)</li>
+        <li><strong>Double-click label</strong> — Focus label text field</li>
+        <li><strong>Drag label</strong> — Reposition on canvas</li>
+        <li><strong>+ Label</strong> — Add label, then click canvas</li>
+        <li><strong>⌘S</strong> — Save to local storage</li>
+        <li><strong>⌘⇧N</strong> — Clear floorplan (blank canvas)</li>
+        <li><strong>Reset</strong> — Restore default apartment layout</li>
+        <li><strong>⌘Z / ⌘⇧Z</strong> — Undo / redo</li>
+        <li><strong>R</strong> — Rotate 90° (or drag handle)</li>
+        <li><strong>⌘D</strong> — Duplicate selection</li>
+        <li><strong>Alt+drag item</strong> — Duplicate & move</li>
+        <li><strong>Shift+click</strong> — Multi-select</li>
+        <li><strong>⌫</strong> — Delete selection</li>
+        <li><strong>[ / ]</strong> — Send backward / bring forward</li>
+        <li><strong>{ / }</strong> — Collapse catalog / properties</li>
+        <li><strong>Arrows</strong> — Nudge item 3″</li>
+        <li><strong>Scroll</strong> — Zoom at cursor</li>
+        <li><strong>Space / middle-drag / Alt+drag</strong> — Pan canvas</li>
+        <li><strong>Shift+resize</strong> — Lock aspect ratio</li>
+        <li><strong>Trace image</strong> — Upload or paste a floorplan photo behind the grid; drag and resize in Furnish mode</li>
+      </ul>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

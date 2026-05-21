@@ -1,0 +1,1944 @@
+import { CATALOG, CATEGORIES } from './catalog.js';
+import {
+  createDefaultLayout,
+  createEmptyLayout,
+  validateLayout,
+  cloneLayout,
+} from './default-layout.js';
+import * as sync from './sync.js';
+
+const STORAGE_KEY = 'room-planner-layout';
+const STORAGE_SLOTS_KEY = 'room-planner-saves';
+const PANELS_STORAGE_KEY = 'room-planner-panels';
+const PX_PER_FT = 14;
+const BG_TRACE_ID = 'trace';
+const BG_DEFAULT_OPACITY = 0.5;
+const BG_MAX_PX = 4096;
+
+const state = {
+  layout: createDefaultLayout(),
+  mode: 'furnish', // 'furnish' | 'walls'
+  selection: [], // { kind: 'item'|'wall'|'label', id }[]
+  drag: null,
+  pan: { x: 40, y: 40 },
+  zoom: 1,
+  history: [],
+  historyIndex: -1,
+  spaceHeld: false,
+  catalogQuery: '',
+  panels: { left: false, right: false },
+  placingLabel: false,
+};
+
+const $ = (sel) => document.querySelector(sel);
+const canvas = () => $('#floor-canvas');
+const svgNS = 'http://www.w3.org/2000/svg';
+
+function uid(prefix = 'id') {
+  return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+function setStatus(text) {
+  $('#status-msg').textContent = text;
+}
+
+function loadPanelState() {
+  try {
+    const raw = sessionStorage.getItem(PANELS_STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (typeof data.left === 'boolean') state.panels.left = data.left;
+    if (typeof data.right === 'boolean') state.panels.right = data.right;
+  } catch (_) {}
+}
+
+function savePanelState() {
+  sessionStorage.setItem(PANELS_STORAGE_KEY, JSON.stringify(state.panels));
+}
+
+function applyPanelState() {
+  const app = $('.app');
+  if (!app) return;
+  app.classList.toggle('left-collapsed', state.panels.left);
+  app.classList.toggle('right-collapsed', state.panels.right);
+  ['left', 'right'].forEach((side) => {
+    const collapsed = state.panels[side];
+    $(`#panel-${side}`)?.setAttribute('aria-hidden', collapsed ? 'true' : 'false');
+    $(`#panel-toggle-${side}`)?.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    $(`#btn-panel-${side}`)?.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+  });
+  resizeCanvas();
+}
+
+function togglePanel(side) {
+  if (side !== 'left' && side !== 'right') return;
+  state.panels[side] = !state.panels[side];
+  savePanelState();
+  applyPanelState();
+}
+
+function ftToPx(v) {
+  return v * PX_PER_FT * state.zoom;
+}
+
+function pxToFt(v) {
+  return v / (PX_PER_FT * state.zoom);
+}
+
+function snapFt(v, grid = 0.25) {
+  return Math.round(v / grid) * grid;
+}
+
+function pushHistory() {
+  state.history = state.history.slice(0, state.historyIndex + 1);
+  state.history.push(cloneLayout(state.layout));
+  if (state.history.length > 50) state.history.shift();
+  else state.historyIndex++;
+  updateUndoButtons();
+  sync.onLocalEdit();
+}
+
+function undo() {
+  if (state.historyIndex <= 0) return;
+  state.historyIndex--;
+  state.layout = cloneLayout(state.history[state.historyIndex]);
+  state.selection = [];
+  render();
+  toast('Undo');
+}
+
+function redo() {
+  if (state.historyIndex >= state.history.length - 1) return;
+  state.historyIndex++;
+  state.layout = cloneLayout(state.history[state.historyIndex]);
+  state.selection = [];
+  render();
+  toast('Redo');
+}
+
+function updateUndoButtons() {
+  $('#btn-undo').disabled = state.historyIndex <= 0;
+  $('#btn-redo').disabled = state.historyIndex >= state.history.length - 1;
+}
+
+function getWall(id) {
+  return state.layout.walls.find((w) => w.id === id);
+}
+
+function getItem(id) {
+  return state.layout.items.find((i) => i.id === id);
+}
+
+function getRoomLabel(id) {
+  return (state.layout.roomLabels || []).find((r) => r.id === id);
+}
+
+function getBackgroundImage() {
+  return state.layout.backgroundImage || null;
+}
+
+function updateTraceImageButton() {
+  const btn = $('#btn-trace-image');
+  if (!btn) return;
+  const has = !!getBackgroundImage()?.src;
+  btn.classList.toggle('active', has && isSelected('background', BG_TRACE_ID));
+  btn.title = has
+    ? 'Trace image — click to select; upload replaces image'
+    : 'Trace image — upload PNG/JPG or paste from clipboard';
+}
+
+function setBackgroundImageFromDataUrl(dataUrl, imgW, imgH) {
+  const { width: bw, height: bh } = state.layout.bounds;
+  const maxW = bw * 0.85;
+  const maxH = bh * 0.85;
+  const aspect = imgW / imgH;
+  let width = maxW;
+  let height = width / aspect;
+  if (height > maxH) {
+    height = maxH;
+    width = height * aspect;
+  }
+  state.layout.backgroundImage = {
+    src: dataUrl,
+    x: snapFt((bw - width) / 2),
+    y: snapFt((bh - height) / 2),
+    width: snapFt(width),
+    height: snapFt(height),
+    opacity: BG_DEFAULT_OPACITY,
+    locked: false,
+  };
+  pushHistory();
+  selectOne('background', BG_TRACE_ID);
+  render();
+  updateTraceImageButton();
+}
+
+function loadBackgroundImageFile(file) {
+  if (!file?.type?.startsWith('image/')) {
+    toast('Use a PNG or JPG image');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalWidth > BG_MAX_PX || img.naturalHeight > BG_MAX_PX) {
+        toast('Large image — export JSON may be slow');
+      }
+      setBackgroundImageFromDataUrl(dataUrl, img.naturalWidth, img.naturalHeight);
+      toast('Trace image added');
+    };
+    img.onerror = () => toast('Could not load image');
+    img.src = dataUrl;
+  };
+  reader.onerror = () => toast('Could not read file');
+  reader.readAsDataURL(file);
+}
+
+function removeBackgroundImage() {
+  if (!getBackgroundImage()) return;
+  delete state.layout.backgroundImage;
+  state.selection = state.selection.filter((s) => s.kind !== 'background');
+  pushHistory();
+  render();
+  updateTraceImageButton();
+  toast('Trace image removed');
+}
+
+function ensureRoomLabels() {
+  if (!state.layout.roomLabels) state.layout.roomLabels = [];
+}
+
+function addRoomLabel(x, y, name = 'Label') {
+  ensureRoomLabels();
+  const label = {
+    id: uid('lbl'),
+    name,
+    x: snapFt(x),
+    y: snapFt(y),
+    fontSize: 11,
+  };
+  state.layout.roomLabels.push(label);
+  pushHistory();
+  selectOne('label', label.id);
+  render();
+  toast('Label added');
+}
+
+function wallLength(w) {
+  return Math.hypot(w.x2 - w.x1, w.y2 - w.y1);
+}
+
+function formatWallLength(ft) {
+  const totalIn = Math.round(ft * 12);
+  const feet = Math.floor(totalIn / 12);
+  const inches = totalIn % 12;
+  if (inches === 0) return `${feet}′`;
+  if (feet === 0) return `${inches}″`;
+  return `${feet}′ ${inches}″`;
+}
+
+function hideWallLengthTip() {
+  const tip = $('#wall-length-tip');
+  if (!tip) return;
+  tip.classList.add('hidden');
+  tip.setAttribute('aria-hidden', 'true');
+}
+
+function updateWallLengthTip(evt, wallId) {
+  const tip = $('#wall-length-tip');
+  if (!tip) return;
+  if (!wallId) {
+    hideWallLengthTip();
+    return;
+  }
+  const w = getWall(wallId);
+  if (!w) {
+    hideWallLengthTip();
+    return;
+  }
+  tip.textContent = formatWallLength(wallLength(w));
+  tip.style.left = `${evt.clientX + 12}px`;
+  tip.style.top = `${evt.clientY + 12}px`;
+  tip.classList.remove('hidden');
+  tip.setAttribute('aria-hidden', 'false');
+}
+
+function updateWallHoverFromPointer(evt) {
+  const hit = hitTest(evt);
+  if (hit?.kind === 'wall') updateWallLengthTip(evt, hit.id);
+  else hideWallLengthTip();
+}
+
+function pointOnWall(w, t) {
+  return {
+    x: w.x1 + (w.x2 - w.x1) * t,
+    y: w.y1 + (w.y2 - w.y1) * t,
+  };
+}
+
+function isSelected(kind, id) {
+  return state.selection.some((s) => s.kind === kind && s.id === id);
+}
+
+function primarySelection() {
+  return state.selection[0] || null;
+}
+
+function clearSelection() {
+  state.selection = [];
+  renderProperties();
+  render();
+}
+
+function selectOne(kind, id) {
+  state.selection = id ? [{ kind, id }] : [];
+  renderProperties();
+  render();
+}
+
+function focusLabelNameField() {
+  renderProperties();
+  requestAnimationFrame(() => {
+    const input = $('#lbl-name');
+    input?.focus();
+    input?.select();
+  });
+}
+
+function cancelPlacingLabel() {
+  if (!state.placingLabel) return false;
+  state.placingLabel = false;
+  $('.canvas-wrap')?.classList.remove('placing-label');
+  return true;
+}
+
+function toggleSelection(kind, id) {
+  const idx = state.selection.findIndex((s) => s.kind === kind && s.id === id);
+  if (idx >= 0) state.selection.splice(idx, 1);
+  else state.selection.push({ kind, id });
+  renderProperties();
+  render();
+}
+
+function selectHit(hit, additive) {
+  if (!hit) {
+    clearSelection();
+    return;
+  }
+  if (additive) toggleSelection(hit.kind, hit.id);
+  else selectOne(hit.kind, hit.id);
+}
+
+function addItem(type, x, y) {
+  const cat = CATALOG[type];
+  if (!cat) return;
+  const item = {
+    id: uid('item'),
+    type,
+    x: snapFt(x),
+    y: snapFt(y),
+    w: cat.w,
+    h: cat.h,
+    rotation: 0,
+  };
+  state.layout.items.push(item);
+  pushHistory();
+  selectOne('item', item.id);
+  render();
+  toast(`Added ${cat.label}`);
+}
+
+function deleteSelected() {
+  if (!state.selection.length) return;
+  if (state.selection.some((s) => s.kind === 'background')) {
+    removeBackgroundImage();
+    return;
+  }
+  const itemIds = new Set(
+    state.selection.filter((s) => s.kind === 'item').map((s) => s.id)
+  );
+  const wallIds = new Set(
+    state.selection.filter((s) => s.kind === 'wall').map((s) => s.id)
+  );
+  const labelIds = new Set(
+    state.selection.filter((s) => s.kind === 'label').map((s) => s.id)
+  );
+  state.layout.items = state.layout.items.filter((i) => !itemIds.has(i.id));
+  state.layout.walls = state.layout.walls.filter((w) => !wallIds.has(w.id));
+  if (wallIds.size) {
+    state.layout.openings = (state.layout.openings || []).filter(
+      (o) => !wallIds.has(o.wallId)
+    );
+  }
+  if (labelIds.size) {
+    state.layout.roomLabels = (state.layout.roomLabels || []).filter(
+      (r) => !labelIds.has(r.id)
+    );
+  }
+  pushHistory();
+  clearSelection();
+  toast('Deleted');
+}
+
+function rotateSelected(deg = 90) {
+  let changed = false;
+  state.selection.forEach((s) => {
+    if (s.kind !== 'item') return;
+    const item = getItem(s.id);
+    if (!item) return;
+    item.rotation = ((item.rotation || 0) + deg + 360) % 360;
+    changed = true;
+  });
+  if (!changed) return;
+  pushHistory();
+  render();
+}
+
+function nudgeSelected(dx, dy) {
+  let moved = false;
+  state.selection.forEach((s) => {
+    if (s.kind === 'background') {
+      const bg = getBackgroundImage();
+      if (!bg || bg.locked) return;
+      bg.x = snapFt(bg.x + dx);
+      bg.y = snapFt(bg.y + dy);
+      moved = true;
+    } else if (s.kind === 'item') {
+      const item = getItem(s.id);
+      if (!item) return;
+      item.x = snapFt(item.x + dx);
+      item.y = snapFt(item.y + dy);
+      moved = true;
+    } else if (s.kind === 'label') {
+      const lbl = getRoomLabel(s.id);
+      if (!lbl) return;
+      lbl.x = snapFt(lbl.x + dx);
+      lbl.y = snapFt(lbl.y + dy);
+      moved = true;
+    }
+  });
+  if (moved) {
+    pushHistory();
+    render();
+  }
+}
+
+function duplicateSelected() {
+  const newIds = [];
+  state.selection.forEach((s) => {
+    if (s.kind !== 'item') return;
+    const src = getItem(s.id);
+    if (!src) return;
+    const copy = {
+      ...src,
+      id: uid('item'),
+      x: snapFt(src.x + 0.5),
+      y: snapFt(src.y + 0.5),
+    };
+    state.layout.items.push(copy);
+    newIds.push(copy.id);
+  });
+  if (!newIds.length) return;
+  pushHistory();
+  state.selection = newIds.map((id) => ({ kind: 'item', id }));
+  render();
+  toast('Duplicated');
+}
+
+function bringItemForward(id) {
+  const items = state.layout.items;
+  const i = items.findIndex((it) => it.id === id);
+  if (i < 0 || i >= items.length - 1) return;
+  [items[i], items[i + 1]] = [items[i + 1], items[i]];
+  pushHistory();
+  render();
+}
+
+function sendItemBackward(id) {
+  const items = state.layout.items;
+  const i = items.findIndex((it) => it.id === id);
+  if (i <= 0) return;
+  [items[i], items[i - 1]] = [items[i - 1], items[i]];
+  pushHistory();
+  render();
+}
+
+function updatePanCursor() {
+  const wrap = $('.canvas-wrap');
+  const svg = canvas();
+  const grabbing = state.drag?.type === 'pan';
+  const grab = state.spaceHeld && !grabbing;
+  wrap?.classList.toggle('cursor-grab', grab);
+  wrap?.classList.toggle('cursor-grabbing', grabbing);
+  svg?.classList.toggle('cursor-grab', grab);
+  svg?.classList.toggle('cursor-grabbing', grabbing);
+}
+
+/* —— Persistence —— */
+function saveToLocal(slotName) {
+  const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
+  saves[slotName || 'autosave'] = {
+    savedAt: new Date().toISOString(),
+    layout: cloneLayout(state.layout),
+  };
+  localStorage.setItem(STORAGE_SLOTS_KEY, JSON.stringify(saves));
+  if (!sync.isPlanSessionActive()) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.layout));
+  }
+  $('#save-name').value = slotName || 'autosave';
+  refreshSaveList();
+  toast(`Saved “${slotName || 'autosave'}”`);
+}
+
+function loadFromLocal(name) {
+  const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
+  const entry = saves[name];
+  if (!entry?.layout) {
+    toast('No save found');
+    return;
+  }
+  if (!validateLayout(entry.layout)) {
+    toast('Invalid layout data');
+    return;
+  }
+  state.layout = cloneLayout(entry.layout);
+  state.selection = [];
+  pushHistory();
+  render();
+  toast(`Loaded “${name}”`);
+}
+
+function tryLoadAutosave() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    if (validateLayout(data)) {
+      state.layout = data;
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+function exportJson() {
+  const json = JSON.stringify(state.layout, null, 2);
+  $('#export-text').value = json;
+  $('#modal-export').classList.remove('hidden');
+}
+
+function importJson(text) {
+  try {
+    const data = JSON.parse(text);
+    if (!validateLayout(data)) throw new Error('Invalid schema');
+    state.layout = data;
+    state.selection = [];
+    pushHistory();
+    render();
+    $('#modal-import').classList.add('hidden');
+    toast('Layout imported');
+  } catch (e) {
+    toast('Import failed: ' + e.message);
+  }
+}
+
+function clearAutosaveStorage() {
+  localStorage.removeItem(STORAGE_KEY);
+  const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
+  if (saves.autosave) {
+    delete saves.autosave;
+    localStorage.setItem(STORAGE_SLOTS_KEY, JSON.stringify(saves));
+    refreshSaveList();
+  }
+}
+
+function resetDefault() {
+  if (!confirm('Reset to default floorplan? Unsaved changes will be lost.')) return;
+  state.layout = createDefaultLayout();
+  state.selection = [];
+  pushHistory();
+  render();
+  toast('Reset to default');
+}
+
+function clearFloorplan() {
+  if (
+    !confirm(
+      'Clear the entire floorplan? All walls, furniture, openings, and labels will be removed. Unsaved changes will be lost.'
+    )
+  ) {
+    return;
+  }
+  const hadBg = !!getBackgroundImage()?.src;
+  let keepBg = false;
+  if (hadBg) {
+    keepBg = !confirm(
+      'Also remove the trace background image?\n\nOK — remove image too\nCancel — keep trace image on blank canvas'
+    );
+  }
+  const savedBg = keepBg && hadBg ? cloneLayout(getBackgroundImage()) : null;
+  state.layout = createEmptyLayout();
+  if (savedBg) state.layout.backgroundImage = savedBg;
+  state.selection = [];
+  clearAutosaveStorage();
+  pushHistory();
+  render();
+  updateTraceImageButton();
+  toast(keepBg && hadBg ? 'Floorplan cleared (image kept)' : 'Floorplan cleared');
+}
+
+function refreshSaveList() {
+  const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
+  const list = $('#save-list');
+  if (!list) return;
+  window.__refreshSaves = refreshSaveList;
+  const names = Object.keys(saves).sort(
+    (a, b) => new Date(saves[b].savedAt) - new Date(saves[a].savedAt)
+  );
+  list.innerHTML = names
+    .map(
+      (n) =>
+        `<button type="button" class="catalog-item" data-load="${n}"><span>${n}</span><span class="dims">${new Date(saves[n].savedAt).toLocaleString()}</span></button>`
+    )
+    .join('');
+  list.querySelectorAll('[data-load]').forEach((btn) => {
+    btn.addEventListener('click', () => loadFromLocal(btn.dataset.load));
+  });
+}
+
+/* —— SVG rendering —— */
+function worldToScreen(x, y) {
+  return {
+    x: state.pan.x + ftToPx(x),
+    y: state.pan.y + ftToPx(y),
+  };
+}
+
+function screenToWorld(sx, sy) {
+  return {
+    x: pxToFt(sx - state.pan.x),
+    y: pxToFt(sy - state.pan.y),
+  };
+}
+
+function renderBackgroundLayer(svg) {
+  const bg = getBackgroundImage();
+  if (!bg?.src) return;
+
+  const p = worldToScreen(bg.x, bg.y);
+  const pw = ftToPx(bg.width);
+  const ph = ftToPx(bg.height);
+  const sel = isSelected('background', BG_TRACE_ID);
+  const gBg = el('g', { class: `background-layer ${sel ? 'selected' : ''}` });
+
+  gBg.appendChild(
+    el('image', {
+      href: bg.src,
+      x: p.x,
+      y: p.y,
+      width: pw,
+      height: ph,
+      opacity: bg.opacity ?? BG_DEFAULT_OPACITY,
+      preserveAspectRatio: 'none',
+      class: 'trace-image',
+    })
+  );
+
+  if (state.mode === 'furnish') {
+    gBg.appendChild(
+      el('rect', {
+        x: p.x,
+        y: p.y,
+        width: pw,
+        height: ph,
+        fill: 'transparent',
+        class: 'trace-hit',
+        'data-bg': '1',
+      })
+    );
+  }
+
+  if (sel && state.mode === 'furnish') {
+    gBg.appendChild(
+      el('rect', {
+        x: p.x - 1,
+        y: p.y - 1,
+        width: pw + 2,
+        height: ph + 2,
+        fill: 'none',
+        stroke: 'var(--selection)',
+        'stroke-width': 1.5,
+        'pointer-events': 'none',
+        class: 'trace-outline',
+      })
+    );
+    if (!bg.locked) {
+      [
+        { x: p.x, y: p.y, corner: 'nw' },
+        { x: p.x + pw, y: p.y, corner: 'ne' },
+        { x: p.x, y: p.y + ph, corner: 'sw' },
+        { x: p.x + pw, y: p.y + ph, corner: 'se' },
+      ].forEach((h) => {
+        gBg.appendChild(
+          el('rect', {
+            x: h.x - 5,
+            y: h.y - 5,
+            width: 10,
+            height: 10,
+            class: 'resize-handle trace-handle',
+            'data-bg-resize': h.corner,
+          })
+        );
+      });
+    }
+  }
+
+  svg.appendChild(gBg);
+}
+
+function render() {
+  const svg = canvas();
+  if (!svg) return;
+  svg.innerHTML = '';
+  svg.setAttribute('class', `mode-${state.mode}`);
+
+  renderBackgroundLayer(svg);
+
+  const { width, height } = state.layout.bounds;
+  const gGrid = el('g', { class: 'grid-layer' });
+  for (let x = 0; x <= width; x += 1) {
+    const p1 = worldToScreen(x, 0);
+    const p2 = worldToScreen(x, height);
+    gGrid.appendChild(
+      el('line', {
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+        class: x % 5 === 0 ? 'grid-major' : 'grid-minor',
+        opacity: x % 5 === 0 ? 0.6 : 0.25,
+      })
+    );
+  }
+  for (let y = 0; y <= height; y += 1) {
+    const p1 = worldToScreen(0, y);
+    const p2 = worldToScreen(width, y);
+    gGrid.appendChild(
+      el('line', {
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+        class: y % 5 === 0 ? 'grid-major' : 'grid-minor',
+        opacity: y % 5 === 0 ? 0.6 : 0.25,
+      })
+    );
+  }
+  svg.appendChild(gGrid);
+
+  const gLabels = el('g', { class: 'labels-layer' });
+  (state.layout.roomLabels || []).forEach((r) => {
+    const p = worldToScreen(r.x, r.y);
+    const sel = isSelected('label', r.id);
+    const fs = r.fontSize || 11;
+    const g = el('g', {
+      class: `room-label-group ${sel ? 'selected' : ''}`,
+      'data-label-id': r.id,
+    });
+    const hitW = Math.max(48, r.name.length * fs * 0.55);
+    g.appendChild(
+      el('rect', {
+        x: p.x - 2,
+        y: p.y - 2,
+        width: hitW,
+        height: fs + 8,
+        fill: 'transparent',
+        class: 'room-label-hit',
+        'data-label-id': r.id,
+      })
+    );
+    const t = el('text', {
+      x: p.x,
+      y: p.y + fs,
+      class: `room-label ${sel ? 'selected' : ''}`,
+      'data-label-id': r.id,
+      'font-size': fs,
+    });
+    t.textContent = r.name;
+    g.appendChild(t);
+    if (sel) {
+      g.appendChild(
+        el('rect', {
+          x: p.x - 3,
+          y: p.y - 3,
+          width: hitW + 2,
+          height: fs + 10,
+          fill: 'none',
+          stroke: 'var(--selection)',
+          'stroke-width': 1.5,
+          'pointer-events': 'none',
+        })
+      );
+    }
+    gLabels.appendChild(g);
+  });
+
+  const gWalls = el('g', { class: 'walls-layer' });
+  state.layout.walls.forEach((w) => {
+    const p1 = worldToScreen(w.x1, w.y1);
+    const p2 = worldToScreen(w.x2, w.y2);
+    const sel = isSelected('wall', w.id);
+    if (state.mode === 'furnish') {
+      gWalls.appendChild(
+        el('line', {
+          x1: p1.x,
+          y1: p1.y,
+          x2: p2.x,
+          y2: p2.y,
+          class: 'wall-hit-area',
+          'data-wall-id': w.id,
+        })
+      );
+    }
+    const line = el('line', {
+      x1: p1.x,
+      y1: p1.y,
+      x2: p2.x,
+      y2: p2.y,
+      class: `wall-line ${w.exterior ? 'exterior' : ''} ${sel ? 'selected' : ''}`,
+      'data-wall-id': w.id,
+    });
+    if (state.mode === 'walls') {
+      line.classList.add('wall-hit');
+      line.style.strokeWidth = sel ? 5 : w.exterior ? 8 : 6;
+      line.style.cursor = 'pointer';
+    } else {
+      line.style.pointerEvents = 'none';
+    }
+    gWalls.appendChild(line);
+
+    if (state.mode === 'walls' && sel) {
+      [p1, p2].forEach((p, idx) => {
+        const h = el('circle', {
+          cx: p.x,
+          cy: p.y,
+          r: 6,
+          class: 'wall-endpoint-handle',
+          'data-wall-id': w.id,
+          'data-endpoint': idx === 0 ? 'start' : 'end',
+        });
+        gWalls.appendChild(h);
+      });
+    }
+  });
+  svg.appendChild(gWalls);
+
+  const gOpen = el('g', { class: 'openings-layer' });
+  (state.layout.openings || []).forEach((o) => {
+    const w = getWall(o.wallId);
+    if (!w) return;
+    const len = wallLength(w);
+    const hw = (o.width || 3) / 2 / len;
+    const t0 = Math.max(0, o.t - hw);
+    const t1 = Math.min(1, o.t + hw);
+    const a = worldToScreen(
+      w.x1 + (w.x2 - w.x1) * t0,
+      w.y1 + (w.y2 - w.y1) * t0
+    );
+    const b = worldToScreen(
+      w.x1 + (w.x2 - w.x1) * t1,
+      w.y1 + (w.y2 - w.y1) * t1
+    );
+    gOpen.appendChild(
+      el('line', {
+        x1: a.x,
+        y1: a.y,
+        x2: b.x,
+        y2: b.y,
+        class: `opening-${o.kind}`,
+        stroke: o.kind === 'window' ? '#7eb8da' : '#999',
+        'stroke-width': o.kind === 'window' ? 4 : 2,
+      })
+    );
+  });
+  svg.appendChild(gOpen);
+
+  const gItems = el('g', { class: 'items-layer' });
+  state.layout.items.forEach((item) => {
+    const cat = CATALOG[item.type] || { label: item.type };
+    const sel = isSelected('item', item.id);
+    const rot = item.rotation || 0;
+    const cx = item.x + item.w / 2;
+    const cy = item.y + item.h / 2;
+    const p = worldToScreen(item.x, item.y);
+    const pw = ftToPx(item.w);
+    const ph = ftToPx(item.h);
+
+    const g = el('g', {
+      class: `item ${sel ? 'selected' : ''}`,
+      'data-item-id': item.id,
+      transform: `translate(${p.x},${p.y}) rotate(${rot},${pw / 2},${ph / 2})`,
+    });
+
+    const rect = el('rect', {
+      x: 0,
+      y: 0,
+      width: pw,
+      height: ph,
+      rx: cat.round ? pw / 2 : 2,
+      class: `item-rect ${cat.fixture ? 'fixture' : ''} ${sel ? 'selected' : ''}`,
+      opacity: cat.opacity ?? 1,
+    });
+    g.appendChild(rect);
+
+    const label = el('text', {
+      x: pw / 2,
+      y: ph / 2 + 3,
+      class: 'item-label',
+      'text-anchor': 'middle',
+    });
+    label.textContent = cat.label.split(' ')[0];
+    g.appendChild(label);
+
+    if (sel && state.mode === 'furnish' && state.selection.length === 1) {
+      g.appendChild(
+        el('rect', {
+          x: -1,
+          y: -1,
+          width: pw + 2,
+          height: ph + 2,
+          fill: 'none',
+          stroke: 'var(--selection)',
+          'stroke-width': 1.5,
+          'pointer-events': 'none',
+        })
+      );
+      const handles = [
+        { x: 0, y: 0, corner: 'nw' },
+        { x: pw, y: 0, corner: 'ne' },
+        { x: 0, y: ph, corner: 'sw' },
+        { x: pw, y: ph, corner: 'se' },
+      ];
+      handles.forEach((h) => {
+        g.appendChild(
+          el('rect', {
+            x: h.x - 5,
+            y: h.y - 5,
+            width: 10,
+            height: 10,
+            class: 'resize-handle',
+            'data-resize': h.corner,
+          })
+        );
+      });
+      g.appendChild(
+        el('circle', {
+          cx: pw / 2,
+          cy: -14,
+          r: 6,
+          class: 'rotate-handle',
+          'data-rotate': '1',
+        })
+      );
+    }
+
+    gItems.appendChild(g);
+  });
+  svg.appendChild(gItems);
+  svg.appendChild(gLabels);
+
+  sync.renderPeers(svg, worldToScreen);
+
+  const bgNote = getBackgroundImage()?.src ? ' · trace image' : '';
+  setStatus(
+    `${state.mode === 'walls' ? 'Edit walls' : 'Furnish'} · ${state.layout.items.length} items${bgNote} · zoom ${(state.zoom * 100).toFixed(0)}%`
+  );
+  renderProperties();
+  updateTraceImageButton();
+}
+
+function el(tag, attrs = {}) {
+  const node = document.createElementNS(svgNS, tag);
+  Object.entries(attrs).forEach(([k, v]) => {
+    if (k === 'class') node.setAttribute('class', v);
+    else node.setAttribute(k, v);
+  });
+  return node;
+}
+
+function renderProperties() {
+  const panel = $('#props-panel');
+  if (!panel) return;
+  if (!state.selection.length) {
+    const bgHint = getBackgroundImage()?.src
+      ? ' Click the trace image (empty areas) or use <strong>Trace image</strong> in the toolbar to select it.'
+      : ' Use <strong>Trace image</strong> to upload or paste a floorplan photo behind the grid.';
+    panel.innerHTML = `<p class="empty-state">Select furniture, a wall, or a room label. Double-click a label to edit its text.${bgHint}</p>`;
+    return;
+  }
+  if (state.selection.length > 1) {
+    const n = state.selection.filter((s) => s.kind === 'item').length;
+    const w = state.selection.filter((s) => s.kind === 'wall').length;
+    const l = state.selection.filter((s) => s.kind === 'label').length;
+    const parts = [];
+    if (n) parts.push(`${n} item${n > 1 ? 's' : ''}`);
+    if (w) parts.push(`${w} wall${w > 1 ? 's' : ''}`);
+    if (l) parts.push(`${l} label${l > 1 ? 's' : ''}`);
+    panel.innerHTML = `
+      <p class="empty-state" style="padding-top:0">${parts.join(', ')} selected.</p>
+      <button type="button" class="btn" id="prop-delete">Delete selection</button>
+    `;
+    $('#prop-delete')?.addEventListener('click', deleteSelected);
+    return;
+  }
+  const sel = primarySelection();
+  if (sel.kind === 'background') {
+    const bg = getBackgroundImage();
+    if (!bg) {
+      clearSelection();
+      return;
+    }
+    panel.innerHTML = `
+      <p class="empty-state" style="padding-top:0;margin-bottom:8px;font-size:11px">Trace background image</p>
+      <div class="prop-row">
+        <label>X (ft)<input type="number" id="bg-x" value="${bg.x}" step="0.25"></label>
+        <label>Y (ft)<input type="number" id="bg-y" value="${bg.y}" step="0.25"></label>
+      </div>
+      <div class="prop-row">
+        <label>Width (ft)<input type="number" id="bg-w" value="${bg.width}" step="0.25" min="1"></label>
+        <label>Height (ft)<input type="number" id="bg-h" value="${bg.height}" step="0.25" min="1"></label>
+      </div>
+      <label>Opacity<input type="range" id="bg-opacity" min="0.1" max="1" step="0.05" value="${bg.opacity ?? BG_DEFAULT_OPACITY}"></label>
+      <label style="display:flex;align-items:center;gap:6px;margin:8px 0;font-size:12px">
+        <input type="checkbox" id="bg-locked" ${bg.locked ? 'checked' : ''}> Lock position (while tracing walls)
+      </label>
+      <button type="button" class="btn" id="bg-replace">Replace image…</button>
+      <button type="button" class="btn" id="bg-remove">Remove trace image</button>
+    `;
+    const applyBg = () => {
+      pushHistory();
+      render();
+    };
+    $('#bg-x')?.addEventListener('change', (e) => {
+      bg.x = parseFloat(e.target.value) || 0;
+      applyBg();
+    });
+    $('#bg-y')?.addEventListener('change', (e) => {
+      bg.y = parseFloat(e.target.value) || 0;
+      applyBg();
+    });
+    $('#bg-w')?.addEventListener('change', (e) => {
+      bg.width = Math.max(1, parseFloat(e.target.value) || bg.width);
+      applyBg();
+    });
+    $('#bg-h')?.addEventListener('change', (e) => {
+      bg.height = Math.max(1, parseFloat(e.target.value) || bg.height);
+      applyBg();
+    });
+    $('#bg-opacity')?.addEventListener('input', (e) => {
+      bg.opacity = parseFloat(e.target.value);
+      render();
+    });
+    $('#bg-opacity')?.addEventListener('change', () => pushHistory());
+    $('#bg-locked')?.addEventListener('change', (e) => {
+      bg.locked = e.target.checked;
+      applyBg();
+    });
+    $('#bg-replace')?.addEventListener('click', () => $('#bg-image-file')?.click());
+    $('#bg-remove')?.addEventListener('click', removeBackgroundImage);
+    return;
+  }
+  if (sel.kind === 'label') {
+    const lbl = getRoomLabel(sel.id);
+    if (!lbl) {
+      clearSelection();
+      return;
+    }
+    panel.innerHTML = `
+      <p class="empty-state" style="padding-top:0;margin-bottom:8px;font-size:11px">Room label</p>
+      <label>Text<input type="text" id="lbl-name" value="${lbl.name.replace(/"/g, '&quot;')}"></label>
+      <div class="prop-row">
+        <label>X (ft)<input type="number" id="lbl-x" value="${lbl.x}" step="0.25"></label>
+        <label>Y (ft)<input type="number" id="lbl-y" value="${lbl.y}" step="0.25"></label>
+      </div>
+      <label>Font size<input type="number" id="lbl-fs" value="${lbl.fontSize || 11}" step="1" min="8" max="32"></label>
+      <button type="button" class="btn" id="prop-delete">Delete label</button>
+    `;
+    const applyLabel = (key, val) => {
+      if (key === 'name') lbl.name = String(val).trim() || lbl.name;
+      else lbl[key] = val;
+      pushHistory();
+      render();
+    };
+    $('#lbl-name')?.addEventListener('change', (e) => applyLabel('name', e.target.value));
+    $('#lbl-name')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        applyLabel('name', e.target.value);
+        e.target.blur();
+      }
+    });
+    ['lbl-x', 'lbl-y', 'lbl-fs'].forEach((id) => {
+      $(`#${id}`)?.addEventListener('change', (e) => {
+        const key = id === 'lbl-fs' ? 'fontSize' : id.replace('lbl-', '');
+        applyLabel(key, parseFloat(e.target.value) || 0);
+      });
+    });
+    $('#prop-delete')?.addEventListener('click', deleteSelected);
+    return;
+  }
+  if (sel.kind === 'item') {
+    const item = getItem(sel.id);
+    const cat = CATALOG[item.type];
+    panel.innerHTML = `
+      <div class="prop-row">
+        <label>Type<input readonly value="${cat?.label || item.type}"></label>
+        <label>Rotation°<input type="number" id="prop-rot" value="${item.rotation || 0}" step="90"></label>
+      </div>
+      <div class="prop-row">
+        <label>X (ft)<input type="number" id="prop-x" value="${item.x}" step="0.25"></label>
+        <label>Y (ft)<input type="number" id="prop-y" value="${item.y}" step="0.25"></label>
+      </div>
+      <div class="prop-row">
+        <label>Width (ft)<input type="number" id="prop-w" value="${item.w}" step="0.25" min="0.5"></label>
+        <label>Depth (ft)<input type="number" id="prop-h" value="${item.h}" step="0.25" min="0.5"></label>
+      </div>
+      <button type="button" class="btn" id="prop-rotate">Rotate 90°</button>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+        <button type="button" class="btn" id="prop-forward" title="Bring forward">↑ layer</button>
+        <button type="button" class="btn" id="prop-back" title="Send backward">↓ layer</button>
+        <button type="button" class="btn" id="prop-dup">Duplicate</button>
+        <button type="button" class="btn" id="prop-delete">Delete</button>
+      </div>
+    `;
+    ['prop-x', 'prop-y', 'prop-w', 'prop-h', 'prop-rot'].forEach((id) => {
+      $(`#${id}`)?.addEventListener('change', (e) => {
+        const key = id.replace('prop-', '');
+        const map = { x: 'x', y: 'y', w: 'w', h: 'h', rot: 'rotation' };
+        item[map[key]] = parseFloat(e.target.value) || 0;
+        pushHistory();
+        render();
+      });
+    });
+    $('#prop-rotate')?.addEventListener('click', () => rotateSelected(90));
+    $('#prop-forward')?.addEventListener('click', () => bringItemForward(item.id));
+    $('#prop-back')?.addEventListener('click', () => sendItemBackward(item.id));
+    $('#prop-dup')?.addEventListener('click', duplicateSelected);
+    $('#prop-delete')?.addEventListener('click', deleteSelected);
+  } else {
+    const w = getWall(sel.id);
+    panel.innerHTML = `
+      <div class="prop-row">
+        <label>Start X<input type="number" id="w-x1" value="${w.x1}" step="0.25"></label>
+        <label>Start Y<input type="number" id="w-y1" value="${w.y1}" step="0.25"></label>
+      </div>
+      <div class="prop-row">
+        <label>End X<input type="number" id="w-x2" value="${w.x2}" step="0.25"></label>
+        <label>End Y<input type="number" id="w-y2" value="${w.y2}" step="0.25"></label>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;margin:8px 0;font-size:12px">
+        <input type="checkbox" id="w-ext" ${w.exterior ? 'checked' : ''}> Exterior wall
+      </label>
+      <button type="button" class="btn" id="prop-delete">Delete wall</button>
+    `;
+    const bind = (id, key, isCheck) => {
+      $(`#${id}`)?.addEventListener('change', (e) => {
+        w[key] = isCheck ? e.target.checked : parseFloat(e.target.value) || 0;
+        pushHistory();
+        render();
+      });
+    };
+    bind('w-x1', 'x1');
+    bind('w-y1', 'y1');
+    bind('w-x2', 'x2');
+    bind('w-y2', 'y2');
+    bind('w-ext', 'exterior', true);
+    $('#prop-delete')?.addEventListener('click', deleteSelected);
+  }
+}
+
+/* —— Pointer interaction —— */
+function getSvgPoint(evt) {
+  const svg = canvas();
+  const pt = svg.createSVGPoint();
+  pt.x = evt.clientX;
+  pt.y = evt.clientY;
+  const ctm = svg.getScreenCTM().inverse();
+  return pt.matrixTransform(ctm);
+}
+
+function hitTest(evt) {
+  const target = evt.target;
+  const bgResize = target.dataset?.bgResize || target.getAttribute?.('data-bg-resize');
+  if (bgResize) return { kind: 'background', id: BG_TRACE_ID, resize: bgResize };
+  if (target.dataset?.bg || target.getAttribute?.('data-bg')) {
+    return { kind: 'background', id: BG_TRACE_ID };
+  }
+  const labelId =
+    target.getAttribute?.('data-label-id') ||
+    target.closest?.('[data-label-id]')?.getAttribute('data-label-id');
+  if (labelId) return { kind: 'label', id: labelId };
+  const itemId = target.closest?.('[data-item-id]')?.getAttribute('data-item-id');
+  if (itemId) return { kind: 'item', id: itemId, resize: target.dataset.resize, rotate: target.dataset.rotate };
+  const wallId = target.getAttribute?.('data-wall-id');
+  if (wallId) {
+    return {
+      kind: 'wall',
+      id: wallId,
+      endpoint: target.getAttribute('data-endpoint'),
+    };
+  }
+  return null;
+}
+
+function shouldPan(evt) {
+  return (
+    evt.button === 1 ||
+    state.spaceHeld ||
+    evt.altKey ||
+    (evt.pointerType === 'touch' && evt.buttons === 0 && evt.isPrimary === false)
+  );
+}
+
+function startPan(evt) {
+  const svg = canvas();
+  svg.setPointerCapture(evt.pointerId);
+  state.drag = { type: 'pan', start: getSvgPoint(evt), origPan: { ...state.pan } };
+  updatePanCursor();
+}
+
+function onPointerDown(evt) {
+  const svg = canvas();
+  hideWallLengthTip();
+  // Block native text selection so drag/pan/select handlers receive pointer moves.
+  if (evt.button === 0 || evt.button === 1) evt.preventDefault();
+
+  const pt = getSvgPoint(evt);
+  const hit = hitTest(evt);
+
+  if (shouldPan(evt)) {
+    startPan(evt);
+    return;
+  }
+
+  if (evt.button !== 0) return;
+  svg.setPointerCapture(evt.pointerId);
+
+  if (state.mode === 'walls') {
+    if (hit?.kind === 'wall') {
+      selectHit(hit, evt.shiftKey);
+      const w = getWall(hit.id);
+      state.drag = {
+        type: hit.endpoint ? 'wall-endpoint' : 'wall-move',
+        id: hit.id,
+        endpoint: hit.endpoint,
+        start: pt,
+        orig: cloneLayout(w),
+      };
+      return;
+    }
+    if (evt.shiftKey) {
+      const w = screenToWorld(pt.x, pt.y);
+      const wall = {
+        id: uid('wall'),
+        x1: snapFt(w.x),
+        y1: snapFt(w.y),
+        x2: snapFt(w.x),
+        y2: snapFt(w.y),
+      };
+      state.layout.walls.push(wall);
+      selectOne('wall', wall.id);
+      state.drag = { type: 'wall-draw', id: wall.id, start: pt };
+      return;
+    }
+    clearSelection();
+    startPan(evt);
+    return;
+  }
+
+  if (state.mode === 'furnish') {
+    if (hit?.kind === 'background') {
+      const bg = getBackgroundImage();
+      if (!bg) return;
+      if (bg.locked && !hit.resize) {
+        selectOne('background', BG_TRACE_ID);
+        return;
+      }
+      if (!isSelected('background', BG_TRACE_ID)) selectOne('background', BG_TRACE_ID);
+      if (hit.resize && !bg.locked) {
+        state.drag = {
+          type: 'bg-resize',
+          corner: hit.resize,
+          start: pt,
+          orig: { x: bg.x, y: bg.y, w: bg.width, h: bg.height },
+          aspect: bg.width / bg.height,
+        };
+      } else if (!bg.locked) {
+        state.drag = {
+          type: 'bg-move',
+          start: pt,
+          orig: { x: bg.x, y: bg.y },
+        };
+      }
+      return;
+    }
+    if (hit?.kind === 'label') {
+      cancelPlacingLabel();
+      if (!isSelected('label', hit.id)) selectHit(hit, evt.shiftKey);
+      else if (evt.shiftKey) selectHit(hit, true);
+      const lbl = getRoomLabel(hit.id);
+      state.drag = {
+        type: 'label-move',
+        id: hit.id,
+        start: pt,
+        orig: { x: lbl.x, y: lbl.y },
+      };
+      return;
+    }
+    if (state.placingLabel) {
+      const w = screenToWorld(pt.x, pt.y);
+      addRoomLabel(w.x, w.y);
+      cancelPlacingLabel();
+      return;
+    }
+    if (hit?.kind === 'item') {
+      const item = getItem(hit.id);
+      if (evt.altKey) {
+        const copy = {
+          ...item,
+          id: uid('item'),
+          x: snapFt(item.x),
+          y: snapFt(item.y),
+        };
+        state.layout.items.push(copy);
+        selectOne('item', copy.id);
+        state.drag = {
+          type: 'item-move',
+          id: copy.id,
+          start: pt,
+          orig: { x: copy.x, y: copy.y },
+          duplicated: true,
+        };
+        return;
+      }
+      if (!isSelected('item', hit.id)) selectHit(hit, evt.shiftKey);
+      else if (evt.shiftKey) selectHit(hit, true);
+
+      const target = getItem(hit.id);
+      if (hit.resize) {
+        state.drag = {
+          type: 'resize',
+          id: hit.id,
+          corner: hit.resize,
+          start: pt,
+          orig: { x: target.x, y: target.y, w: target.w, h: target.h },
+          aspect: target.w / target.h,
+        };
+      } else if (hit.rotate) {
+        const cx = target.x + target.w / 2;
+        const cy = target.y + target.h / 2;
+        const world = screenToWorld(pt.x, pt.y);
+        state.drag = {
+          type: 'rotate-drag',
+          id: hit.id,
+          startAngle: Math.atan2(world.y - cy, world.x - cx),
+          origRot: target.rotation || 0,
+        };
+      } else {
+        const origins = {};
+        state.selection
+          .filter((s) => s.kind === 'item')
+          .forEach((s) => {
+            const it = getItem(s.id);
+            if (it) origins[s.id] = { x: it.x, y: it.y };
+          });
+        state.drag = {
+          type: 'item-move',
+          id: hit.id,
+          start: pt,
+          orig: { x: target.x, y: target.y },
+          origins,
+        };
+      }
+      return;
+    }
+    clearSelection();
+    startPan(evt);
+    return;
+  }
+}
+
+function applyResize(item, corner, dxf, dyf, lockAspect, evt) {
+  const o = state.drag.orig;
+  const min = 0.5;
+  let x = o.x;
+  let y = o.y;
+  let w = o.w;
+  let h = o.h;
+  if (corner === 'se') {
+    w = o.w + dxf;
+    h = o.h + dyf;
+  } else if (corner === 'nw') {
+    x = o.x + dxf;
+    y = o.y + dyf;
+    w = o.w - dxf;
+    h = o.h - dyf;
+  } else if (corner === 'ne') {
+    y = o.y + dyf;
+    w = o.w + dxf;
+    h = o.h - dyf;
+  } else if (corner === 'sw') {
+    x = o.x + dxf;
+    w = o.w - dxf;
+    h = o.h + dyf;
+  }
+  if (lockAspect) {
+    const ratio = state.drag.aspect || o.w / o.h;
+    if (Math.abs(dxf) > Math.abs(dyf)) h = w / ratio;
+    else w = h * ratio;
+    if (corner === 'nw' || corner === 'sw') x = o.x + o.w - w;
+    if (corner === 'nw' || corner === 'ne') y = o.y + o.h - h;
+  }
+  item.x = snapFt(x);
+  item.y = snapFt(y);
+  item.w = Math.max(min, snapFt(w));
+  item.h = Math.max(min, snapFt(h));
+}
+
+function onPointerMove(evt) {
+  const pt0 = getSvgPoint(evt);
+  const w0 = screenToWorld(pt0.x, pt0.y);
+  sync.presenceTick(w0.x, w0.y);
+
+  if (!state.drag) {
+    updateWallHoverFromPointer(evt);
+    return;
+  }
+  hideWallLengthTip();
+  const pt = getSvgPoint(evt);
+  const dx = pt.x - state.drag.start.x;
+  const dy = pt.y - state.drag.start.y;
+
+  if (state.drag.type === 'pan') {
+    state.pan.x = state.drag.origPan.x + dx;
+    state.pan.y = state.drag.origPan.y + dy;
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'label-move') {
+    const lbl = getRoomLabel(state.drag.id);
+    if (lbl) {
+      lbl.x = snapFt(state.drag.orig.x + pxToFt(dx));
+      lbl.y = snapFt(state.drag.orig.y + pxToFt(dy));
+    }
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'item-move') {
+    const dxf = pxToFt(dx);
+    const dyf = pxToFt(dy);
+    if (state.drag.origins) {
+      Object.entries(state.drag.origins).forEach(([id, orig]) => {
+        const item = getItem(id);
+        if (!item) return;
+        item.x = snapFt(orig.x + dxf);
+        item.y = snapFt(orig.y + dyf);
+      });
+    } else {
+      const item = getItem(state.drag.id);
+      item.x = snapFt(state.drag.orig.x + dxf);
+      item.y = snapFt(state.drag.orig.y + dyf);
+    }
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'resize') {
+    const item = getItem(state.drag.id);
+    applyResize(item, state.drag.corner, pxToFt(dx), pxToFt(dy), evt.shiftKey, evt);
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'bg-move') {
+    const bg = getBackgroundImage();
+    if (bg) {
+      bg.x = snapFt(state.drag.orig.x + pxToFt(dx));
+      bg.y = snapFt(state.drag.orig.y + pxToFt(dy));
+    }
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'bg-resize') {
+    const bg = getBackgroundImage();
+    if (bg) {
+      const stub = {
+        x: bg.x,
+        y: bg.y,
+        w: bg.width,
+        h: bg.height,
+      };
+      applyResize(stub, state.drag.corner, pxToFt(dx), pxToFt(dy), evt.shiftKey, evt);
+      bg.x = stub.x;
+      bg.y = stub.y;
+      bg.width = stub.w;
+      bg.height = stub.h;
+    }
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'rotate-drag') {
+    const item = getItem(state.drag.id);
+    const cx = item.x + item.w / 2;
+    const cy = item.y + item.h / 2;
+    const world = screenToWorld(pt.x, pt.y);
+    const angle = Math.atan2(world.y - cy, world.x - cx);
+    const delta = ((angle - state.drag.startAngle) * 180) / Math.PI;
+    item.rotation = Math.round(state.drag.origRot + delta);
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'wall-move') {
+    const w = getWall(state.drag.id);
+    const o = state.drag.orig;
+    const dxf = pxToFt(dx);
+    const dyf = pxToFt(dy);
+    w.x1 = snapFt(o.x1 + dxf);
+    w.y1 = snapFt(o.y1 + dyf);
+    w.x2 = snapFt(o.x2 + dxf);
+    w.y2 = snapFt(o.y2 + dyf);
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'wall-endpoint') {
+    const w = getWall(state.drag.id);
+    const o = state.drag.orig;
+    if (state.drag.endpoint === 'start') {
+      w.x1 = snapFt(o.x1 + pxToFt(dx));
+      w.y1 = snapFt(o.y1 + pxToFt(dy));
+    } else {
+      w.x2 = snapFt(o.x2 + pxToFt(dx));
+      w.y2 = snapFt(o.y2 + pxToFt(dy));
+    }
+    render();
+    return;
+  }
+
+  if (state.drag.type === 'wall-draw') {
+    const w = getWall(state.drag.id);
+    const end = screenToWorld(pt.x, pt.y);
+    w.x2 = snapFt(end.x);
+    w.y2 = snapFt(end.y);
+    render();
+  }
+}
+
+function onPointerUp(evt) {
+  if (state.drag) {
+    const historyTypes = [
+      'item-move',
+      'label-move',
+      'resize',
+      'bg-move',
+      'bg-resize',
+      'rotate-drag',
+      'wall-move',
+      'wall-endpoint',
+      'wall-draw',
+    ];
+    if (historyTypes.includes(state.drag.type)) {
+      if (state.drag.type === 'item-move' && state.drag.origins) {
+        Object.keys(state.drag.origins).forEach((id) => {
+          const item = getItem(id);
+          if (item) {
+            item.x = snapFt(item.x);
+            item.y = snapFt(item.y);
+          }
+        });
+      } else if (state.drag.type === 'item-move') {
+        const item = getItem(state.drag.id);
+        if (item) {
+          item.x = snapFt(item.x);
+          item.y = snapFt(item.y);
+        }
+      } else if (state.drag.type === 'label-move') {
+        const lbl = getRoomLabel(state.drag.id);
+        if (lbl) {
+          lbl.x = snapFt(lbl.x);
+          lbl.y = snapFt(lbl.y);
+        }
+      } else if (state.drag.type === 'resize') {
+        const item = getItem(state.drag.id);
+        if (item) {
+          item.x = snapFt(item.x);
+          item.y = snapFt(item.y);
+          item.w = snapFt(item.w);
+          item.h = snapFt(item.h);
+        }
+      } else if (state.drag.type === 'bg-move') {
+        const bg = getBackgroundImage();
+        if (bg) {
+          bg.x = snapFt(bg.x);
+          bg.y = snapFt(bg.y);
+        }
+      } else if (state.drag.type === 'bg-resize') {
+        const bg = getBackgroundImage();
+        if (bg) {
+          bg.x = snapFt(bg.x);
+          bg.y = snapFt(bg.y);
+          bg.width = snapFt(bg.width);
+          bg.height = snapFt(bg.height);
+        }
+      } else if (state.drag.type === 'rotate-drag') {
+        const item = getItem(state.drag.id);
+        if (item) item.rotation = Math.round((item.rotation || 0) / 5) * 5;
+      }
+      pushHistory();
+    }
+    state.drag = null;
+    updatePanCursor();
+    canvas()?.releasePointerCapture(evt.pointerId);
+  }
+}
+
+function onWheel(evt) {
+  evt.preventDefault();
+  const delta = evt.deltaY > 0 ? 0.92 : 1.08;
+  const pt = getSvgPoint(evt);
+  const world = screenToWorld(pt.x, pt.y);
+  state.zoom = Math.min(2.5, Math.max(0.4, state.zoom * delta));
+  state.pan.x = pt.x - ftToPx(world.x);
+  state.pan.y = pt.y - ftToPx(world.y);
+  render();
+}
+
+function onDrop(evt) {
+  evt.preventDefault();
+  const type = evt.dataTransfer.getData('application/x-item-type');
+  if (!type) return;
+  const pt = getSvgPoint(evt);
+  const w = screenToWorld(pt.x, pt.y);
+  addItem(type, w.x - (CATALOG[type]?.w || 2) / 2, w.y - (CATALOG[type]?.h || 2) / 2);
+}
+
+function onLabelDblClick(evt) {
+  if (state.mode !== 'furnish') return;
+  const hit = hitTest(evt);
+  if (hit?.kind !== 'label') return;
+  evt.preventDefault();
+  evt.stopPropagation();
+  state.drag = null;
+  selectOne('label', hit.id);
+  focusLabelNameField();
+}
+
+/* —— Mode & UI —— */
+function setMode(mode) {
+  state.mode = mode;
+  cancelPlacingLabel();
+  document.querySelectorAll('[data-mode]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  render();
+  toast(mode === 'walls' ? 'Edit floorplan — Shift+drag to draw wall' : 'Furnish mode');
+}
+
+function catalogMatchesQuery(type, v, query) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return (
+    type.toLowerCase().includes(q) ||
+    v.label.toLowerCase().includes(q) ||
+    (v.category || '').toLowerCase().includes(q)
+  );
+}
+
+function buildCatalog() {
+  const root = $('#catalog-list');
+  const query = state.catalogQuery;
+  root.innerHTML = CATEGORIES.map((cat) => {
+    const items = Object.entries(CATALOG).filter(
+      ([type, v]) => v.category === cat.id && catalogMatchesQuery(type, v, query)
+    );
+    if (!items.length) return '';
+    const buttons = items
+      .map(
+        ([type, v]) => `
+      <button type="button" class="catalog-item" draggable="true" data-type="${type}" data-label="${v.label}">
+        <span class="thumb ${v.round ? 'round' : ''}" style="width:${Math.min(28, v.w * 4)}px;height:${Math.min(20, v.h * 4)}px"></span>
+        <span><span>${v.label}</span><br><span class="dims">${v.w}′×${v.h}′</span></span>
+      </button>`
+      )
+      .join('');
+    return `<details class="catalog-group" open><summary>${cat.label}</summary>${buttons}</details>`;
+  }).join('');
+
+  if (!root.innerHTML.trim()) {
+    root.innerHTML = `<p class="empty-state">No catalog items match “${query}”.</p>`;
+  }
+
+  root.querySelectorAll('.catalog-item').forEach((btn) => {
+    btn.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('application/x-item-type', btn.dataset.type);
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+  });
+}
+
+function bindHotkeys() {
+  document.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, textarea, select')) return;
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key === 's') {
+      e.preventDefault();
+      saveToLocal($('#save-name')?.value || 'autosave');
+    } else if (mod && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+    } else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      redo();
+    } else if (mod && e.shiftKey && (e.key === 'n' || e.key === 'N')) {
+      e.preventDefault();
+      clearFloorplan();
+    } else if (e.key === 'v' || e.key === 'V') setMode('furnish');
+    else if (e.key === 'e' || e.key === 'E') setMode('walls');
+    else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
+    else if (e.key === 'r' || e.key === 'R') rotateSelected(90);
+    else if (e.key === 'Escape') {
+      if (!cancelPlacingLabel()) clearSelection();
+    }
+    else if (e.key === 'd' && mod) {
+      e.preventDefault();
+      duplicateSelected();
+    } else if (e.key === ']' && !mod) {
+      const sel = primarySelection();
+      if (sel?.kind === 'item') bringItemForward(sel.id);
+    } else if (e.key === '[' && !mod) {
+      const sel = primarySelection();
+      if (sel?.kind === 'item') sendItemBackward(sel.id);
+    } else if (e.key === '{' && !mod) {
+      e.preventDefault();
+      togglePanel('left');
+    } else if (e.key === '}' && !mod) {
+      e.preventDefault();
+      togglePanel('right');
+    } else if (e.code === 'Space') {
+      e.preventDefault();
+      if (!state.spaceHeld) {
+        state.spaceHeld = true;
+        updatePanCursor();
+      }
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      nudgeSelected(-0.25, 0);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      nudgeSelected(0.25, 0);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      nudgeSelected(0, -0.25);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      nudgeSelected(0, 0.25);
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+      state.spaceHeld = false;
+      updatePanCursor();
+    }
+  });
+}
+
+function bindToolbarMore() {
+  const wrap = $('#toolbar-more');
+  const trigger = $('#btn-toolbar-more');
+  if (!wrap || !trigger) return;
+
+  const close = () => {
+    wrap.classList.remove('is-open');
+    trigger.setAttribute('aria-expanded', 'false');
+  };
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = wrap.classList.toggle('is-open');
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  wrap.querySelectorAll('.toolbar-more-menu .btn').forEach((btn) => {
+    btn.addEventListener('click', close);
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target)) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+}
+
+function bindUI() {
+  bindToolbarMore();
+  $('#btn-mode-furnish')?.addEventListener('click', () => setMode('furnish'));
+  $('#btn-mode-walls')?.addEventListener('click', () => setMode('walls'));
+  $('#btn-undo')?.addEventListener('click', undo);
+  $('#btn-redo')?.addEventListener('click', redo);
+  $('#btn-save')?.addEventListener('click', () => saveToLocal($('#save-name')?.value || 'autosave'));
+  $('#btn-export')?.addEventListener('click', exportJson);
+  $('#btn-import')?.addEventListener('click', () => {
+    $('#import-text').value = '';
+    $('#modal-import').classList.remove('hidden');
+  });
+  $('#btn-reset')?.addEventListener('click', resetDefault);
+  $('#btn-clear')?.addEventListener('click', clearFloorplan);
+  $('#btn-add-wall')?.addEventListener('click', () => {
+    setMode('walls');
+    toast('Shift+drag on canvas to draw a new wall');
+  });
+  $('#btn-add-label')?.addEventListener('click', () => {
+    setMode('furnish');
+    state.placingLabel = true;
+    $('.canvas-wrap')?.classList.add('placing-label');
+    toast('Click the canvas to place a label');
+  });
+  $('#btn-trace-image')?.addEventListener('click', () => {
+    setMode('furnish');
+    if (getBackgroundImage()?.src) {
+      selectOne('background', BG_TRACE_ID);
+      toast('Trace image selected — drag to move, corners to scale');
+    } else {
+      $('#bg-image-file')?.click();
+    }
+  });
+  $('#bg-image-file')?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) loadBackgroundImageFile(file);
+    e.target.value = '';
+  });
+  document.addEventListener('paste', (e) => {
+    if (e.target.matches('input, textarea')) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          setMode('furnish');
+          loadBackgroundImageFile(file);
+        }
+        break;
+      }
+    }
+  });
+  $('#import-confirm')?.addEventListener('click', () => importJson($('#import-text').value));
+  $('#import-cancel')?.addEventListener('click', () => $('#modal-import').classList.add('hidden'));
+  $('#export-close')?.addEventListener('click', () => $('#modal-export').classList.add('hidden'));
+  $('#export-copy')?.addEventListener('click', async () => {
+    await navigator.clipboard.writeText($('#export-text').value);
+    toast('Copied to clipboard');
+  });
+
+  $('#btn-share')?.addEventListener('click', () => {
+    const deps = {
+      getState: () => state,
+      render,
+      pushHistory,
+      cloneLayout,
+      validateLayout,
+      toast,
+      updateUndoButtons,
+    };
+    sync.shareNewPlan(deps, toast);
+  });
+
+  $('#catalog-search')?.addEventListener('input', (e) => {
+    state.catalogQuery = e.target.value.trim();
+    buildCatalog();
+  });
+
+  const bindPanelToggle = (side) => {
+    const toggle = () => togglePanel(side);
+    $(`#btn-panel-${side}`)?.addEventListener('click', toggle);
+    $(`#panel-toggle-${side}`)?.addEventListener('click', toggle);
+  };
+  bindPanelToggle('left');
+  bindPanelToggle('right');
+
+  const wrap = $('.canvas-wrap');
+  const svg = canvas();
+  const blockSelect = (e) => e.preventDefault();
+  wrap?.addEventListener('selectstart', blockSelect);
+  wrap?.addEventListener('pointerdown', onPointerDown);
+  wrap?.addEventListener('pointermove', onPointerMove);
+  wrap?.addEventListener('pointerleave', hideWallLengthTip);
+  wrap?.addEventListener('pointerup', onPointerUp);
+  wrap?.addEventListener('pointercancel', onPointerUp);
+  svg?.addEventListener('contextmenu', (e) => e.preventDefault());
+  svg?.addEventListener('auxclick', (e) => e.preventDefault());
+  svg?.addEventListener('wheel', onWheel, { passive: false });
+  svg?.addEventListener('dragover', (e) => e.preventDefault());
+  svg?.addEventListener('drop', onDrop);
+  svg?.addEventListener('dblclick', onLabelDblClick);
+
+  document.body.addEventListener('dragover', (e) => {
+    if (e.dataTransfer.types.includes('application/x-item-type')) e.preventDefault();
+  });
+}
+
+function resizeCanvas() {
+  const wrap = $('.canvas-wrap');
+  const svg = canvas();
+  svg.setAttribute('width', wrap.clientWidth);
+  svg.setAttribute('height', wrap.clientHeight);
+  render();
+}
+
+async function init() {
+  loadPanelState();
+  buildCatalog();
+
+  const planParam = sync.getPlanIdFromLocation();
+  if (planParam) {
+    await sync.startPlanSession(planParam, {
+      getState: () => state,
+      render,
+      pushHistory,
+      cloneLayout,
+      validateLayout,
+      toast,
+      updateUndoButtons,
+    });
+  } else {
+    if (!tryLoadAutosave()) state.layout = createDefaultLayout();
+    pushHistory();
+  }
+
+  bindUI();
+  bindHotkeys();
+  refreshSaveList();
+  applyPanelState();
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+  setMode('furnish');
+}
+
+init().catch((e) => console.error(e));
