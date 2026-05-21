@@ -38,19 +38,6 @@
           <span class="btn-label-full">Edit floorplan</span>
           <span class="btn-label-short" aria-hidden="true">Floor</span>
         </button>
-        <button type="button" class="btn icon toolbar-compact-text" id="btn-add-wall" title="Draw wall — Shift+drag in edit mode">
-          <span class="btn-label-full">+ Wall</span>
-          <span class="btn-label-short" aria-hidden="true">+</span>
-        </button>
-        <button type="button" class="btn icon toolbar-compact-text" id="btn-add-label" title="Add room label — click canvas (furnish mode)">
-          <span class="btn-label-full">+ Label</span>
-          <span class="btn-label-short" aria-hidden="true">L</span>
-        </button>
-        <button type="button" class="btn icon toolbar-compact-text" id="btn-trace-image" title="Trace image — upload PNG/JPG or paste from clipboard">
-          <span class="btn-label-full">Trace image</span>
-          <span class="btn-label-short" aria-hidden="true">Img</span>
-        </button>
-        <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
       </div>
       <span class="sep sep-modes"></span>
       <div class="toolbar-group toolbar-group--panels">
@@ -75,6 +62,20 @@
           title="More actions"
         >⋯</button>
         <div class="toolbar-more-menu" id="toolbar-more-menu" role="menu">
+          <button type="button" class="btn icon toolbar-compact-text" id="btn-add-wall" role="menuitem" title="Draw wall — Shift+drag in edit mode">
+            <span class="btn-label-full">+ Wall</span>
+            <span class="btn-label-short" aria-hidden="true">+</span>
+          </button>
+          <button type="button" class="btn icon toolbar-compact-text" id="btn-add-label" role="menuitem" title="Add room label — click canvas (furnish mode)">
+            <span class="btn-label-full">+ Label</span>
+            <span class="btn-label-short" aria-hidden="true">L</span>
+          </button>
+          <button type="button" class="btn icon toolbar-compact-text" id="btn-trace-image" role="menuitem" title="Trace image — upload PNG/JPG or paste from clipboard">
+            <span class="btn-label-full">Trace image</span>
+            <span class="btn-label-short" aria-hidden="true">Img</span>
+          </button>
+          <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
+          <span class="sep sep-more-tools" aria-hidden="true"></span>
           <button type="button" class="btn" id="btn-save" role="menuitem" title="Save (⌘S)">Save</button>
           <input type="text" id="save-name" class="toolbar-save-name" value="autosave" title="Save slot name" aria-label="Save slot name">
           <button type="button" class="btn" id="btn-export" role="menuitem" title="Export JSON">Export</button>
