@@ -1,6 +1,6 @@
 /**
  * Multiplayer sync: PartyKit WebSocket + plan snapshot API.
- * @see README — meta tag `room-planner-partykit`, LWW semantics.
+ * @see README — meta `room-planner-partykit`, optional `room-planner-api-base`, LWW semantics.
  */
 import {
   cloneLayout,
@@ -36,6 +36,22 @@ function getMetaPartyHost() {
   if (meta) return meta;
   const w = typeof window !== 'undefined' && window.__RP_PARTYKIT_HOST__;
   return typeof w === 'string' ? w.trim() : '';
+}
+
+/** Same-origin `/api/plans` by default; set meta or window.__RP_API_BASE__ when static hosting hits a deployed API. */
+function getPlansApiOrigin() {
+  const el = document.querySelector('meta[name="room-planner-api-base"]');
+  const meta = el?.getAttribute('content')?.trim() ?? '';
+  if (meta) return meta.replace(/\/+$/, '');
+  const w = typeof window !== 'undefined' && window.__RP_API_BASE__;
+  return typeof w === 'string' ? w.trim().replace(/\/+$/, '') : '';
+}
+
+function planApiUrl(path) {
+  const p = path.startsWith('/') ? path : `/${path}`;
+  const base = getPlansApiOrigin();
+  if (!base) return p;
+  return `${base}${p}`;
 }
 
 export function getPlanIdFromLocation() {
@@ -161,9 +177,18 @@ function partyWsUrl(id) {
 }
 
 async function fetchPlanSnapshot(id) {
-  const res = await fetch(`/api/plans/${encodeURIComponent(id)}`);
+  let res;
+  try {
+    res = await fetch(planApiUrl(`/api/plans/${encodeURIComponent(id)}`));
+  } catch {
+    return null;
+  }
   if (!res.ok) return null;
-  return res.json();
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 function applyRemoteState(layout, revision, updatedAt) {
@@ -416,24 +441,68 @@ export function renderPeers(svg, worldToScreen) {
  * @param {Parameters<typeof startPlanSession>[1]} d
  */
 export async function shareNewPlan(d, toastFn) {
-  const res = await fetch('/api/plans', { method: 'POST' });
-  if (!res.ok) {
-    toastFn?.('Could not create shared plan (API)');
+  const postUrl = planApiUrl('/api/plans');
+  let res;
+  try {
+    res = await fetch(postUrl, { method: 'POST', mode: 'cors' });
+  } catch {
+    toastFn?.(
+      'Share unavailable (network). Use the deployed app, run vercel dev, or open via http (not file:).'
+    );
     return;
   }
-  const { id } = await res.json();
+
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!res.ok) {
+    const hint = typeof payload?.hint === 'string' ? payload.hint : '';
+    const errTxt = typeof payload?.error === 'string' ? payload.error : '';
+    const detail = hint || errTxt;
+    /** Static/http.server hits usually 404 `/api/plans`, often with an HTML body (parse → null). */
+    const looksMissingApiRoute =
+      res.status === 404 ||
+      (payload == null &&
+        Number.isFinite(res.status) &&
+        res.status >= 400 &&
+        res.status < 500);
+    if (looksMissingApiRoute) {
+      toastFn?.(
+        'Share needs /api/plans (not available on plain localhost:8080). Run vercel dev or use the deployed site; optional: meta room-planner-api-base pointing at production.'
+      );
+    } else if (res.status === 503 || res.status >= 500) {
+      toastFn?.(
+        detail
+          ? `Share failed — ${detail}`
+          : 'Share failed — cloud storage unavailable. Set KV_REST_API_URL and KV_REST_API_TOKEN on Vercel.'
+      );
+    } else {
+      toastFn?.(detail ? `Could not share — ${detail}` : 'Could not create shared plan');
+    }
+    return;
+  }
+
+  const { id } = payload || {};
   if (!id) {
     toastFn?.('Invalid plan response');
     return;
   }
-  const url = new URL(window.location.href);
-  url.searchParams.set('plan', id);
-  window.history.replaceState({}, '', url);
+  const shareLoc = new URL(window.location.href);
+  shareLoc.searchParams.set('plan', id);
+  window.history.replaceState({}, '', shareLoc);
   try {
-    await navigator.clipboard.writeText(url.toString());
+    await navigator.clipboard.writeText(shareLoc.toString());
     toastFn?.('Share link copied');
   } catch {
     toastFn?.(`Share link: ?plan=${id}`);
   }
-  await startPlanSession(id, d);
+  try {
+    await startPlanSession(id, d);
+  } catch {
+    toastFn?.('Share link updated, but live session failed to start. Reload or check PartyKit/meta.');
+  }
 }

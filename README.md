@@ -13,7 +13,14 @@ cd room_planner
 python3 -m http.server 8080
 ```
 
-Open [http://localhost:8080](http://localhost:8080).
+Open [http://localhost:8080](http://localhost:8080). **That port serves only static files** (HTML/CSS/JS from `public/`). There is **no** `/api/plans`, PartyKit relay, or Vercel serverless runtime on `:8080` unless you **also** run `vercel dev` (different port by default unless configured) — see multiplayer dev below.
+
+### Troubleshooting Share
+
+- **Share always fails after `python3 -m http.server 8080`:** Expected. **`POST /api/plans`** is implemented by **`vercel dev` / deployed Vercel**, not Python’s server. Either run **`vercel dev`** and open its URL, deploy and use production, or — for debugging only — set in `public/index.html` the optional meta **`room-planner-api-base`** (see commented example) to your deployed origin so Share hits that API from localhost.
+- **Share fails on Vercel (`503`, “Storage unavailable”)** or vague **500**: Link **Vercel KV** (or Upstash) and set **`KV_REST_API_URL`** and **`KV_REST_API_TOKEN`** on the project (**`.env.local`** locally, Project Settings → Environment Variables in production).
+- **`FUNCTION_INVOCATION_FAILED` on `POST /api/plans` (or other `/api/plans/*`):** In the Vercel dashboard → your deployment → **Functions** / **Logs**, open the failing request. Most often the runtime is missing **KV REST env**: add **`KV_REST_API_URL`** and **`KV_REST_API_TOKEN`** for Production (and redeploy), or confirm the **Vercel KV** integration is linked to the project. Without them, older code paths could crash instead of returning JSON; the API now responds with **`503`** and a **`hint`** when KV is not configured. Persistent invocation failures after setting env usually mean a bad token/URL or a runtime error — check function logs for the stack trace.
+- **`file:` URL:** ES modules generally require **http/https** — open the site over HTTP as above.
 
 > ES modules require HTTP; opening `index.html` directly from disk may block imports.
 
@@ -118,7 +125,7 @@ Transferable, self-contained representation:
 
 - HTMX 2 — swaps help/save hints from inline templates
 - SVG canvas — walls, openings, furniture
-- **Vercel serverless** — `@vercel/kv` / Upstash-compatible REST env for plan blobs (`api/plans/*`)
+- **Vercel serverless** — `@vercel/kv` / Upstash-compatible REST env for plan blobs (`api/plans/*`). These routes are compiled as **Node.js** functions (`@vercel/node`), not Edge — required for `@vercel/kv`.
 - **PartyKit** — `party/plan-room.ts`, configured in `partykit.json` (`parties.plan`); deploy with `npm run party:deploy`
 - Vanilla JS modules — `js/sync.js` coordinates PartyKit + API when `?plan=` is present
 
