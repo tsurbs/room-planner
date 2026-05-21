@@ -191,14 +191,48 @@ async function fetchPlanSnapshot(id) {
   }
 }
 
+function layoutSyncFingerprint(layout) {
+  return JSON.stringify(stripHeavyBackgroundForSync(cloneLayout(layout)));
+}
+
+function filterSelectionToLayout(selection, layout) {
+  if (!selection?.length) return [];
+  return selection.filter((sel) => {
+    if (sel.kind === 'item') {
+      return layout.items?.some((it) => it.id === sel.id);
+    }
+    if (sel.kind === 'wall') {
+      return layout.walls?.some((w) => w.id === sel.id);
+    }
+    if (sel.kind === 'label') {
+      return (layout.roomLabels || []).some((r) => r.id === sel.id);
+    }
+    if (sel.kind === 'background') {
+      return !!layout.backgroundImage?.src;
+    }
+    return false;
+  });
+}
+
 function applyRemoteState(layout, revision, updatedAt) {
   if (!deps) return;
   const st = deps.getState();
-  if (st.drag) return;
+  if (st.drag || st.dragPending) return;
   if (typeof revision === 'number' && revision < syncedRevision) return;
   if (!deps.validateLayout(layout)) return;
-  st.layout = deps.cloneLayout(layout);
-  st.selection = [];
+
+  const nextLayout = deps.cloneLayout(layout);
+  const incomingFp = layoutSyncFingerprint(nextLayout);
+  const localFp = layoutSyncFingerprint(st.layout);
+
+  if (incomingFp === localFp) {
+    if (typeof revision === 'number') syncedRevision = revision;
+    return;
+  }
+
+  const preservedSelection = filterSelectionToLayout(st.selection, nextLayout);
+  st.layout = nextLayout;
+  st.selection = preservedSelection;
   st.history = [deps.cloneLayout(st.layout)];
   st.historyIndex = 0;
   deps.updateUndoButtons();
