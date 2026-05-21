@@ -51,7 +51,40 @@ type ServerState = {
   updatedAt: string;
 };
 
+/** HTTP at project root is not the socket path; browser users expect *something* here. */
+function rootLandingPage(req: Party.Request): Response {
+  const url = new URL(req.url);
+  const host = url.host;
+  const body = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"/><title>Room Planner — PartyKit</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;line-height:1.5">
+<h1>PartyKit host is running</h1>
+<p>This URL is the <strong>multiplayer real-time</strong> server, not the Room Planner UI.</p>
+<p>Use your <strong>Vercel</strong> site to edit floor plans. With a shared plan, the app opens WebSocket:</p>
+<pre style="background:#f4f4f4;padding:1rem;overflow:auto">wss://${host}/parties/plan/&lt;plan-uuid&gt;</pre>
+<p>Set <code>&lt;meta name="room-planner-partykit" content="wss://${host}"&gt;</code> in the app’s HTML.</p>
+</body></html>`;
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
+}
+
 export default class PlanRoom implements Party.Server {
+  /** Non-party HTTP (e.g. <code>GET /</code>) — party rooms use <code>/parties/plan/:id</code>. */
+  static onFetch(
+    req: Party.Request,
+    _lobby: Party.FetchLobby,
+    _ctx: Party.ExecutionContext,
+  ): Response | null {
+    const url = new URL(req.url);
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
+      return rootLandingPage(req);
+    }
+    return null;
+  }
+
   private s: ServerState;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private tick: ReturnType<typeof setInterval> | null = null;

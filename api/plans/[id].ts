@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getKv } from '../_kv';
-import { handlePreflight } from '../_cors';
+import { getKv } from '../_kv.js';
+import { handlePreflight } from '../_cors.js';
 
 export const config = {
   maxDuration: 30,

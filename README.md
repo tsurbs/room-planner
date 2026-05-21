@@ -146,6 +146,8 @@ Optional: `ROOM_SECRET` is accepted by the Party server as an alias for the Bear
 npm run party:deploy
 ```
 
+The PartyKit **HTTPS root** (`https://…partykit.dev/`) is not the editor. It now returns a small **“host is running”** page; **WebSockets** use `wss://<host>/parties/plan/<planId>`. If you still see a generic “Not found” from PartyKit’s edge, **redeploy** after pulling the latest `party/plan-room.ts` (static `onFetch` for `GET /`).
+
 Link the project once (`npx partykit login`). After deploy, set **`PLANDS_API_ORIGIN`** and **`PARTYKIT_SERVERS_SECRET`** in the PartyKit dashboard to match Vercel. Copy the **PartyKit WebSocket host** (see deploy output), map a DNS CNAME if you use a custom subdomain, then set `index.html`:
 
 ```html
