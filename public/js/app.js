@@ -15,7 +15,7 @@ const BG_TRACE_ID = 'trace';
 const BG_DEFAULT_OPACITY = 0.5;
 const BG_MAX_PX = 4096;
 const MOBILE_MQ = '(max-width: 768px)';
-const MOBILE_DRAG_THRESHOLD = 8;
+const DRAG_MOVE_THRESHOLD = 4;
 
 const state = {
   layout: createDefaultLayout(),
@@ -73,11 +73,17 @@ function setStatus(text) {
 function loadPanelState() {
   try {
     const raw = sessionStorage.getItem(PANELS_STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (typeof data.left === 'boolean') state.panels.left = data.left;
-    if (typeof data.right === 'boolean') state.panels.right = data.right;
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (typeof data.left === 'boolean') state.panels.left = data.left;
+      if (typeof data.right === 'boolean') state.panels.right = data.right;
+    }
   } catch (_) {}
+  // Desktop panel prefs use overlay side sheets on mobile and can hide the canvas.
+  if (isMobileTouchUI()) {
+    state.panels.left = true;
+    state.panels.right = true;
+  }
 }
 
 function savePanelState() {
@@ -96,6 +102,15 @@ function applyPanelState() {
     $(`#btn-panel-${side}`)?.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
   });
   resizeCanvas();
+}
+
+/** Collapse overlay panels and fit the plan — safe to call after layout/viewport settles. */
+function ensureMobileLayout() {
+  if (!isMobileTouchUI()) return;
+  state.panels.left = true;
+  state.panels.right = true;
+  applyPanelState();
+  fitPlanToView();
 }
 
 function togglePanel(side) {
@@ -117,13 +132,36 @@ function snapFt(v, grid = 0.25) {
   return Math.round(v / grid) * grid;
 }
 
+const LAYOUT_DRAG_SYNC = new Set([
+  'item-move',
+  'label-move',
+  'resize',
+  'bg-move',
+  'bg-resize',
+  'rotate-drag',
+  'wall-move',
+  'wall-endpoint',
+  'wall-draw',
+]);
+
 function pushHistory() {
   state.history = state.history.slice(0, state.historyIndex + 1);
   state.history.push(cloneLayout(state.layout));
   if (state.history.length > 50) state.history.shift();
   else state.historyIndex++;
   updateUndoButtons();
-  sync.onLocalEdit();
+  if (sync.isPlanSessionActive()) {
+    sync.scheduleLayoutSync({ immediate: true });
+  } else {
+    saveLocalDraft();
+  }
+}
+
+function renderDuringLayoutDrag() {
+  render();
+  if (state.drag && LAYOUT_DRAG_SYNC.has(state.drag.type)) {
+    sync.onLayoutPreview();
+  }
 }
 
 function undo() {
@@ -132,6 +170,8 @@ function undo() {
   state.layout = cloneLayout(state.history[state.historyIndex]);
   state.selection = [];
   render();
+  sync.onLocalEdit();
+  if (!sync.isPlanSessionActive()) saveLocalDraft();
   toast('Undo');
 }
 
@@ -141,6 +181,8 @@ function redo() {
   state.layout = cloneLayout(state.history[state.historyIndex]);
   state.selection = [];
   render();
+  sync.onLocalEdit();
+  if (!sync.isPlanSessionActive()) saveLocalDraft();
   toast('Redo');
 }
 
@@ -520,19 +562,23 @@ function updatePanCursor() {
 }
 
 /* —— Persistence —— */
+function saveLocalDraft() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.layout));
+  } catch (_) {}
+}
+
 function saveToLocal(slotName) {
+  const name = (slotName || 'autosave').trim() || 'autosave';
   const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
-  saves[slotName || 'autosave'] = {
+  saves[name] = {
     savedAt: new Date().toISOString(),
     layout: cloneLayout(state.layout),
   };
   localStorage.setItem(STORAGE_SLOTS_KEY, JSON.stringify(saves));
-  if (!sync.isPlanSessionActive()) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.layout));
-  }
-  $('#save-name').value = slotName || 'autosave';
-  refreshSaveList();
-  toast(`Saved “${slotName || 'autosave'}”`);
+  saveLocalDraft();
+  refreshSessionsPanel();
+  toast(`Saved locally as “${name}”`);
 }
 
 function loadFromLocal(name) {
@@ -551,6 +597,114 @@ function loadFromLocal(name) {
   pushHistory();
   render();
   toast(`Loaded “${name}”`);
+}
+
+function loadLocalDraft() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) {
+    toast('No local draft found');
+    return;
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!validateLayout(data)) throw new Error('Invalid');
+    state.layout = cloneLayout(data);
+    state.selection = [];
+    pushHistory();
+    render();
+    toast('Restored local draft');
+  } catch {
+    toast('Could not restore local draft');
+  }
+}
+
+function refreshSessionsPanel() {
+  const recentEl = $('#recent-sessions-list');
+  const localEl = $('#local-restore-list');
+  const leaveBtn = $('#btn-leave-session');
+  if (leaveBtn) {
+    leaveBtn.classList.toggle('hidden', !sync.isPlanSessionActive());
+  }
+  if (!recentEl && !localEl) return;
+
+  const recent = sync.listRecentPlans();
+  const currentId = sync.getPlanIdFromLocation();
+  if (recentEl) {
+    if (!recent.length) {
+      recentEl.innerHTML =
+        '<p class="empty-state">No shared plans yet. Use Share to create a link.</p>';
+    } else {
+      recentEl.innerHTML = recent
+        .map((p) => {
+          const short = p.id.slice(0, 8);
+          const when = p.openedAt
+            ? new Date(p.openedAt).toLocaleString()
+            : '';
+          const active = p.id === currentId ? ' session-item--active' : '';
+          const label = p.label || short;
+          return `<button type="button" class="catalog-item session-item${active}" data-join-plan="${p.id}"><span>${label}</span><span class="dims">${short} · ${when}</span></button>`;
+        })
+        .join('');
+      recentEl.querySelectorAll('[data-join-plan]').forEach((btn) => {
+        btn.addEventListener('click', () => joinSharedPlan(btn.dataset.joinPlan));
+      });
+    }
+  }
+
+  if (localEl) {
+    const items = [];
+    const draftRaw = localStorage.getItem(STORAGE_KEY);
+    if (draftRaw) {
+      try {
+        const draft = JSON.parse(draftRaw);
+        if (validateLayout(draft)) {
+          items.push({
+            key: '__draft__',
+            label: 'Last local edit',
+            savedAt: null,
+          });
+        }
+      } catch (_) {}
+    }
+    const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
+    Object.keys(saves)
+      .sort((a, b) => new Date(saves[b].savedAt) - new Date(saves[a].savedAt))
+      .forEach((n) => {
+        items.push({ key: n, label: n, savedAt: saves[n].savedAt });
+      });
+    if (!items.length) {
+      localEl.innerHTML =
+        '<p class="empty-state">Nothing saved locally. Use “Save locally” in the toolbar menu.</p>';
+    } else {
+      localEl.innerHTML = items
+        .map((it) => {
+          const when = it.savedAt
+            ? new Date(it.savedAt).toLocaleString()
+            : 'unsaved draft';
+          return `<button type="button" class="catalog-item session-item" data-load-local="${it.key}"><span>${it.label}</span><span class="dims">${when}</span></button>`;
+        })
+        .join('');
+      localEl.querySelectorAll('[data-load-local]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (btn.dataset.loadLocal === '__draft__') loadLocalDraft();
+          else loadFromLocal(btn.dataset.loadLocal);
+        });
+      });
+    }
+  }
+}
+
+async function joinSharedPlan(id) {
+  if (!id) return;
+  if (
+    sync.getPlanIdFromLocation() === id &&
+    sync.getSyncConnectionStatus() === 'live'
+  ) {
+    toast('Already in this session');
+    return;
+  }
+  await sync.joinPlanSession(id, syncDeps(), toast);
+  refreshSessionsPanel();
 }
 
 function tryLoadAutosave() {
@@ -593,7 +747,7 @@ function clearAutosaveStorage() {
   if (saves.autosave) {
     delete saves.autosave;
     localStorage.setItem(STORAGE_SLOTS_KEY, JSON.stringify(saves));
-    refreshSaveList();
+    refreshSessionsPanel();
   }
 }
 
@@ -632,23 +786,16 @@ function clearFloorplan() {
   toast(keepBg && hadBg ? 'Floorplan cleared (image kept)' : 'Floorplan cleared');
 }
 
-function refreshSaveList() {
-  const saves = JSON.parse(localStorage.getItem(STORAGE_SLOTS_KEY) || '{}');
-  const list = $('#save-list');
-  if (!list) return;
-  window.__refreshSaves = refreshSaveList;
-  const names = Object.keys(saves).sort(
-    (a, b) => new Date(saves[b].savedAt) - new Date(saves[a].savedAt)
-  );
-  list.innerHTML = names
-    .map(
-      (n) =>
-        `<button type="button" class="catalog-item" data-load="${n}"><span>${n}</span><span class="dims">${new Date(saves[n].savedAt).toLocaleString()}</span></button>`
-    )
-    .join('');
-  list.querySelectorAll('[data-load]').forEach((btn) => {
-    btn.addEventListener('click', () => loadFromLocal(btn.dataset.load));
-  });
+function syncDeps() {
+  return {
+    getState: () => state,
+    render,
+    pushHistory,
+    cloneLayout,
+    validateLayout,
+    toast,
+    updateUndoButtons,
+  };
 }
 
 /* —— SVG rendering —— */
@@ -1213,6 +1360,15 @@ const IMMEDIATE_DRAG_TYPES = new Set([
   'rotate-drag',
   'wall-endpoint',
   'wall-draw',
+  'pan',
+]);
+
+/** Wait for pointer movement before starting drag (click = select only). */
+const DRAG_DEFER_UNTIL_MOVE_TYPES = new Set([
+  'item-move',
+  'label-move',
+  'bg-move',
+  'wall-move',
 ]);
 
 function clientToSvg(clientX, clientY) {
@@ -1226,7 +1382,9 @@ function clientToSvg(clientX, clientY) {
 function assignDrag(drag, evt) {
   const svg = canvas();
   if (!svg) return;
-  const immediate = !isMobileTouchUI() || IMMEDIATE_DRAG_TYPES.has(drag.type);
+  const immediate =
+    IMMEDIATE_DRAG_TYPES.has(drag.type) ||
+    !DRAG_DEFER_UNTIL_MOVE_TYPES.has(drag.type);
   if (immediate) {
     state.dragPending = null;
     state.drag = drag;
@@ -1247,7 +1405,7 @@ function promotePendingDrag(evt) {
   if (!state.dragPending || state.drag) return false;
   const dx = evt.clientX - state.dragPending.clientX;
   const dy = evt.clientY - state.dragPending.clientY;
-  if (Math.hypot(dx, dy) < MOBILE_DRAG_THRESHOLD) return false;
+  if (Math.hypot(dx, dy) < DRAG_MOVE_THRESHOLD) return false;
   const { clientX, clientY, pointerId, ...drag } = state.dragPending;
   state.drag = drag;
   state.dragPending = null;
@@ -1701,7 +1859,7 @@ function onPointerMove(evt) {
       lbl.x = snapFt(state.drag.orig.x + pxToFt(dx));
       lbl.y = snapFt(state.drag.orig.y + pxToFt(dy));
     }
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1720,14 +1878,14 @@ function onPointerMove(evt) {
       item.x = snapFt(state.drag.orig.x + dxf);
       item.y = snapFt(state.drag.orig.y + dyf);
     }
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
   if (state.drag.type === 'resize') {
     const item = getItem(state.drag.id);
     applyResize(item, state.drag.corner, pxToFt(dx), pxToFt(dy), evt.shiftKey, evt);
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1737,7 +1895,7 @@ function onPointerMove(evt) {
       bg.x = snapFt(state.drag.orig.x + pxToFt(dx));
       bg.y = snapFt(state.drag.orig.y + pxToFt(dy));
     }
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1756,7 +1914,7 @@ function onPointerMove(evt) {
       bg.width = stub.w;
       bg.height = stub.h;
     }
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1768,7 +1926,7 @@ function onPointerMove(evt) {
     const angle = Math.atan2(world.y - cy, world.x - cx);
     const delta = ((angle - state.drag.startAngle) * 180) / Math.PI;
     item.rotation = Math.round(state.drag.origRot + delta);
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1781,7 +1939,7 @@ function onPointerMove(evt) {
     w.y1 = snapFt(o.y1 + dyf);
     w.x2 = snapFt(o.x2 + dxf);
     w.y2 = snapFt(o.y2 + dyf);
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1795,7 +1953,7 @@ function onPointerMove(evt) {
       w.x2 = snapFt(o.x2 + pxToFt(dx));
       w.y2 = snapFt(o.y2 + pxToFt(dy));
     }
-    render();
+    renderDuringLayoutDrag();
     return;
   }
 
@@ -1804,8 +1962,65 @@ function onPointerMove(evt) {
     const end = screenToWorld(pt.x, pt.y);
     w.x2 = snapFt(end.x);
     w.y2 = snapFt(end.y);
-    render();
+    renderDuringLayoutDrag();
   }
+}
+
+function dragMutatedLayout(drag) {
+  if (!drag) return false;
+  if (drag.type === 'item-move') {
+    if (drag.origins) {
+      return Object.entries(drag.origins).some(([id, orig]) => {
+        const it = getItem(id);
+        return it && (it.x !== orig.x || it.y !== orig.y);
+      });
+    }
+    const item = getItem(drag.id);
+    return item && (item.x !== drag.orig.x || item.y !== drag.orig.y);
+  }
+  if (drag.type === 'label-move') {
+    const lbl = getRoomLabel(drag.id);
+    return lbl && (lbl.x !== drag.orig.x || lbl.y !== drag.orig.y);
+  }
+  if (drag.type === 'wall-move' || drag.type === 'wall-endpoint') {
+    const w = getWall(drag.id);
+    const o = drag.orig;
+    if (!w || !o) return false;
+    return w.x1 !== o.x1 || w.y1 !== o.y1 || w.x2 !== o.x2 || w.y2 !== o.y2;
+  }
+  if (drag.type === 'bg-move' && drag.orig) {
+    const bg = getBackgroundImage();
+    return bg && (bg.x !== drag.orig.x || bg.y !== drag.orig.y);
+  }
+  if (drag.type === 'bg-resize' && drag.orig) {
+    const bg = getBackgroundImage();
+    return (
+      bg &&
+      (bg.x !== drag.orig.x ||
+        bg.y !== drag.orig.y ||
+        bg.width !== drag.orig.w ||
+        bg.height !== drag.orig.h)
+    );
+  }
+  if (drag.type === 'resize' && drag.orig) {
+    const item = getItem(drag.id);
+    return (
+      item &&
+      (item.x !== drag.orig.x ||
+        item.y !== drag.orig.y ||
+        item.w !== drag.orig.w ||
+        item.h !== drag.orig.h)
+    );
+  }
+  if (drag.type === 'rotate-drag') {
+    const item = getItem(drag.id);
+    return item && (item.rotation || 0) !== (drag.origRot || 0);
+  }
+  if (drag.type === 'wall-draw') {
+    const w = getWall(drag.id);
+    return w && (w.x1 !== w.x2 || w.y1 !== w.y2);
+  }
+  return true;
 }
 
 function onPointerUp(evt) {
@@ -1832,42 +2047,43 @@ function onPointerUp(evt) {
       'wall-endpoint',
       'wall-draw',
     ];
-    if (historyTypes.includes(state.drag.type)) {
-      if (state.drag.type === 'item-move' && state.drag.origins) {
-        Object.keys(state.drag.origins).forEach((id) => {
+    const drag = state.drag;
+    if (historyTypes.includes(drag.type)) {
+      if (drag.type === 'item-move' && drag.origins) {
+        Object.keys(drag.origins).forEach((id) => {
           const item = getItem(id);
           if (item) {
             item.x = snapFt(item.x);
             item.y = snapFt(item.y);
           }
         });
-      } else if (state.drag.type === 'item-move') {
-        const item = getItem(state.drag.id);
+      } else if (drag.type === 'item-move') {
+        const item = getItem(drag.id);
         if (item) {
           item.x = snapFt(item.x);
           item.y = snapFt(item.y);
         }
-      } else if (state.drag.type === 'label-move') {
-        const lbl = getRoomLabel(state.drag.id);
+      } else if (drag.type === 'label-move') {
+        const lbl = getRoomLabel(drag.id);
         if (lbl) {
           lbl.x = snapFt(lbl.x);
           lbl.y = snapFt(lbl.y);
         }
-      } else if (state.drag.type === 'resize') {
-        const item = getItem(state.drag.id);
+      } else if (drag.type === 'resize') {
+        const item = getItem(drag.id);
         if (item) {
           item.x = snapFt(item.x);
           item.y = snapFt(item.y);
           item.w = snapFt(item.w);
           item.h = snapFt(item.h);
         }
-      } else if (state.drag.type === 'bg-move') {
+      } else if (drag.type === 'bg-move') {
         const bg = getBackgroundImage();
         if (bg) {
           bg.x = snapFt(bg.x);
           bg.y = snapFt(bg.y);
         }
-      } else if (state.drag.type === 'bg-resize') {
+      } else if (drag.type === 'bg-resize') {
         const bg = getBackgroundImage();
         if (bg) {
           bg.x = snapFt(bg.x);
@@ -1875,11 +2091,11 @@ function onPointerUp(evt) {
           bg.width = snapFt(bg.width);
           bg.height = snapFt(bg.height);
         }
-      } else if (state.drag.type === 'rotate-drag') {
-        const item = getItem(state.drag.id);
+      } else if (drag.type === 'rotate-drag') {
+        const item = getItem(drag.id);
         if (item) item.rotation = Math.round((item.rotation || 0) / 5) * 5;
       }
-      pushHistory();
+      if (dragMutatedLayout(drag)) pushHistory();
     }
     state.drag = null;
     updatePanCursor();
@@ -1984,7 +2200,7 @@ function bindHotkeys() {
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key === 's') {
       e.preventDefault();
-      saveToLocal($('#save-name')?.value || 'autosave');
+      saveToLocal('autosave');
     } else if (mod && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
       undo();
@@ -2078,7 +2294,7 @@ function bindUI() {
   $('#btn-mode-walls')?.addEventListener('click', () => setMode('walls'));
   $('#btn-undo')?.addEventListener('click', undo);
   $('#btn-redo')?.addEventListener('click', redo);
-  $('#btn-save')?.addEventListener('click', () => saveToLocal($('#save-name')?.value || 'autosave'));
+  $('#btn-save')?.addEventListener('click', () => saveToLocal('autosave'));
   $('#btn-export')?.addEventListener('click', exportJson);
   $('#btn-import')?.addEventListener('click', () => {
     $('#import-text').value = '';
@@ -2141,16 +2357,14 @@ function bindUI() {
   });
 
   $('#btn-share')?.addEventListener('click', () => {
-    const deps = {
-      getState: () => state,
-      render,
-      pushHistory,
-      cloneLayout,
-      validateLayout,
-      toast,
-      updateUndoButtons,
-    };
-    sync.shareNewPlan(deps, toast);
+    sync.shareNewPlan(syncDeps(), toast).then(() => refreshSessionsPanel());
+  });
+  $('#btn-leave-session')?.addEventListener('click', () => {
+    const loc = new URL(window.location.href);
+    loc.searchParams.delete('plan');
+    loc.searchParams.delete('planId');
+    window.history.replaceState({}, '', loc);
+    location.reload();
   });
 
   $('#catalog-search')?.addEventListener('input', (e) => {
@@ -2196,21 +2410,50 @@ function resizeCanvas() {
   render();
 }
 
+function fitPlanToView(paddingFt = 2) {
+  const wrap = $('.canvas-wrap');
+  if (!wrap || wrap.clientWidth <= 0 || wrap.clientHeight <= 0) return;
+
+  const walls = state.layout.walls || [];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  walls.forEach((w) => {
+    minX = Math.min(minX, w.x1, w.x2);
+    minY = Math.min(minY, w.y1, w.y2);
+    maxX = Math.max(maxX, w.x1, w.x2);
+    maxY = Math.max(maxY, w.y1, w.y2);
+  });
+  if (!Number.isFinite(minX)) {
+    const { width, height } = state.layout.bounds;
+    minX = 0;
+    minY = 0;
+    maxX = width;
+    maxY = height;
+  }
+
+  const pad = paddingFt;
+  const wFt = Math.max(1, maxX - minX + pad * 2);
+  const hFt = Math.max(1, maxY - minY + pad * 2);
+  const zoomX = wrap.clientWidth / (wFt * PX_PER_FT);
+  const zoomY = wrap.clientHeight / (hFt * PX_PER_FT);
+  state.zoom = Math.min(2.5, Math.max(0.4, Math.min(zoomX, zoomY) * 0.92));
+
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  state.pan.x = wrap.clientWidth / 2 - cx * PX_PER_FT * state.zoom;
+  state.pan.y = wrap.clientHeight / 2 - cy * PX_PER_FT * state.zoom;
+  render();
+}
+
 async function init() {
   loadPanelState();
   buildCatalog();
 
   const planParam = sync.getPlanIdFromLocation();
   if (planParam) {
-    await sync.startPlanSession(planParam, {
-      getState: () => state,
-      render,
-      pushHistory,
-      cloneLayout,
-      validateLayout,
-      toast,
-      updateUndoButtons,
-    });
+    await sync.startPlanSession(planParam, syncDeps());
   } else {
     if (!tryLoadAutosave()) state.layout = createDefaultLayout();
     pushHistory();
@@ -2218,10 +2461,14 @@ async function init() {
 
   bindUI();
   bindHotkeys();
-  refreshSaveList();
+  refreshSessionsPanel();
   applyPanelState();
-  resizeCanvas();
+  ensureMobileLayout();
+  requestAnimationFrame(() => ensureMobileLayout());
   window.addEventListener('resize', resizeCanvas);
+  window.matchMedia(MOBILE_MQ).addEventListener('change', (e) => {
+    if (e.matches) ensureMobileLayout();
+  });
   setMode('furnish');
 }
 

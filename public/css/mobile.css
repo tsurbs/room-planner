@@ -12,7 +12,9 @@ html {
   -webkit-tap-highlight-color: transparent;
 }
 
-.app {
+.app,
+.app.left-collapsed,
+.app.right-collapsed {
   --col-left: 0;
   --col-right: 0;
   grid-template-columns: 1fr;
@@ -22,6 +24,7 @@ html {
 }
 
 .toolbar {
+  grid-row: 1;
   min-height: var(--mobile-toolbar-h);
   padding: 0 8px;
   padding-top: max(0px, var(--mobile-safe-top));
@@ -78,7 +81,7 @@ html {
 
 /* Full-width canvas; panels are fixed overlays. */
 .canvas-wrap {
-  grid-column: 1;
+  grid-column: 1 / -1;
   grid-row: 2;
   z-index: 1;
   touch-action: none;
@@ -95,7 +98,7 @@ html {
 }
 
 .statusbar {
-  grid-column: 1;
+  grid-column: 1 / -1;
   grid-row: 3;
   padding: 0 10px;
   padding-bottom: max(0px, var(--mobile-safe-bottom));

@@ -57,8 +57,8 @@ Production: set the same meta tag to your deployed PartyKit host, e.g. `wss://yo
 - **Room labels** — Click a label (e.g. `BEDROOM 2`) to select it; edit text, position (ft), and font size in the Properties panel. Double-click a label to jump to the text field. Drag to reposition. **+ Label** in the toolbar, then click the canvas to add one. Delete with ⌫ when selected.
 - **Edit floorplan mode** — Move walls and endpoints; Shift+drag to draw new segments; mark exterior walls; add room labels with **+ Label**.
 - **Room labels** — Click to select, drag to move, double-click or use the properties panel to edit text; set position and font size; Delete to remove.
-- **Save / load** — Named slots in `localStorage` plus autosave. With `?plan=` active, autosave to the default slot is skipped to avoid fighting cloud state; named saves still work.
-- **Share link** — **Share** calls `POST /api/plans` (KV) and copies a `?plan=` URL. With PartyKit configured (see meta tag below), layout changes debounce to the room (~400ms after edits); cursor presence is overlayed on the SVG canvas.
+- **Sessions** — **Recent shared** lists plans you opened (`?plan=`). **Restore locally** loads your last local draft or named local saves. **Save locally** (⌘S) writes a backup without using the cloud panel.
+- **Share link** — **Share** calls `POST /api/plans` (KV) and copies a `?plan=` URL. With PartyKit configured, layout syncs live during drags (~120ms throttle) and commits on edit end; cursor presence is overlayed on the SVG canvas.
 - **Export / import** — JSON layout file you can copy, email, or version-control.
 
 ### Multiplayer (quick reference)
@@ -68,7 +68,7 @@ Production: set the same meta tag to your deployed PartyKit host, e.g. `wss://yo
 | **Vercel** | Static app + `/api/plans` (cold snapshot, share creation). Needs `KV_REST_API_*` or Vercel KV binding. |
 | **PartyKit** | WebSocket rooms at `/parties/plan/:planId` — in-memory layout + revision; live cursors; debounced `PUT` to Vercel with Bearer secret. |
 
-**Concurrency:** PartyKit **increments `revision` on every valid `layout` message** (processing order = LWW). Clients apply `{ type: 'state' }` only while **`state.drag == null`** and **`remote.revision > syncedRevision`**.
+**Concurrency:** PartyKit **increments `revision` on every valid `layout` message** (processing order = LWW). Clients apply `{ type: 'state' }` when **`remote.revision` advances**, merging the full remote layout except poses for entities you are **actively dragging** (click/select alone does not block updates). Releasing the mouse without moving does not push a stale layout.
 
 **Large trace images:** Sync omits `backgroundImage` when `src` length exceeds **500,000** (toast shown).
 

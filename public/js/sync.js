@@ -11,8 +11,12 @@ import {
 const BG_SYNC_WARN_LEN = 500_000;
 const PRESENCE_MS = 45;
 const PEER_STALE_MS = 18_000;
+const LAYOUT_PREVIEW_MS = 50;
+const LAYOUT_COMMIT_MS = 100;
 const SESSION_NAME_KEY = 'room-planner-display-name';
 const SESSION_PEER_KEY = 'room-planner-peer-id';
+const RECENT_PLANS_KEY = 'room-planner-recent-plans';
+const MAX_RECENT_PLANS = 10;
 
 let planId = null;
 /** @type {WebSocket | null} */
@@ -20,6 +24,8 @@ let ws = null;
 let syncedRevision = 0;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let commitTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let previewTimer = null;
 /** @type {number | null} */
 let lastPresence = 0;
 /** @type {{ getState: () => any, render: () => void, pushHistory: () => void, cloneLayout: (l: any) => any, validateLayout: (l: any) => boolean, toast: (m: string) => void, updateUndoButtons: () => void } | null} */
@@ -214,22 +220,96 @@ function filterSelectionToLayout(selection, layout) {
   });
 }
 
+/** Entity ids the local user is actively dragging (not merely selected). */
+function getActiveDragIds(st) {
+  const drag = st.drag;
+  if (!drag) {
+    return { items: new Set(), walls: new Set(), labels: new Set(), background: false };
+  }
+  const t = drag.type;
+  const items = new Set();
+  const walls = new Set();
+  const labels = new Set();
+  if (t === 'item-move' || t === 'resize' || t === 'rotate-drag') {
+    if (drag.origins) Object.keys(drag.origins).forEach((id) => items.add(id));
+    else if (drag.id) items.add(drag.id);
+  } else if (t === 'wall-move' || t === 'wall-endpoint') {
+    walls.add(drag.id);
+  } else if (t === 'label-move') {
+    labels.add(drag.id);
+  } else if (t === 'bg-move' || t === 'bg-resize') {
+    return { items, walls, labels, background: true };
+  }
+  return { items, walls, labels, background: false };
+}
+
+/** Apply remote layout but keep in-flight local drag poses (selection alone does not lock). */
+function mergeRemoteWithLocalDrag(st, remoteLayout) {
+  const merged = deps.cloneLayout(remoteLayout);
+  const active = getActiveDragIds(st);
+  if (
+    !active.items.size &&
+    !active.walls.size &&
+    !active.labels.size &&
+    !active.background
+  ) {
+    return merged;
+  }
+  active.items.forEach((id) => {
+    const local = st.layout.items?.find((it) => it.id === id);
+    const remote = merged.items?.find((it) => it.id === id);
+    if (local && remote) {
+      remote.x = local.x;
+      remote.y = local.y;
+      remote.w = local.w;
+      remote.h = local.h;
+      remote.rotation = local.rotation;
+    }
+  });
+  active.walls.forEach((id) => {
+    const local = st.layout.walls?.find((w) => w.id === id);
+    const remote = merged.walls?.find((w) => w.id === id);
+    if (local && remote) {
+      remote.x1 = local.x1;
+      remote.y1 = local.y1;
+      remote.x2 = local.x2;
+      remote.y2 = local.y2;
+    }
+  });
+  active.labels.forEach((id) => {
+    const local = st.layout.roomLabels?.find((r) => r.id === id);
+    const remote = merged.roomLabels?.find((r) => r.id === id);
+    if (local && remote) {
+      remote.x = local.x;
+      remote.y = local.y;
+    }
+  });
+  if (active.background && st.layout.backgroundImage) {
+    merged.backgroundImage = deps.cloneLayout({
+      backgroundImage: st.layout.backgroundImage,
+    }).backgroundImage;
+  }
+  return merged;
+}
+
 function applyRemoteState(layout, revision, updatedAt) {
   if (!deps) return;
   const st = deps.getState();
-  if (st.drag || st.dragPending) return;
   if (typeof revision === 'number' && revision < syncedRevision) return;
   if (!deps.validateLayout(layout)) return;
 
-  const nextLayout = deps.cloneLayout(layout);
-  const incomingFp = layoutSyncFingerprint(nextLayout);
+  const remoteBase = deps.cloneLayout(layout);
+  const incomingFp = layoutSyncFingerprint(remoteBase);
   const localFp = layoutSyncFingerprint(st.layout);
+  const revisionAdvanced =
+    typeof revision === 'number' && revision > syncedRevision;
 
-  if (incomingFp === localFp) {
+  if (!revisionAdvanced && incomingFp === localFp) {
     if (typeof revision === 'number') syncedRevision = revision;
     return;
   }
 
+  const nextLayout = mergeRemoteWithLocalDrag(st, remoteBase);
   const preservedSelection = filterSelectionToLayout(st.selection, nextLayout);
   st.layout = nextLayout;
   st.selection = preservedSelection;
@@ -248,6 +328,47 @@ function setStatusLine(msg) {
   if (el) el.textContent = msg;
 }
 
+export function listRecentPlans() {
+  try {
+    const raw = localStorage.getItem(RECENT_PLANS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export function recordRecentPlan(id, label) {
+  if (!id) return;
+  const name =
+    (typeof label === 'string' && label.trim()) ||
+    (typeof id === 'string' && id.slice(0, 8)) ||
+    'Plan';
+  const entry = { id, label: name, openedAt: new Date().toISOString() };
+  const prev = listRecentPlans().filter((p) => p.id !== id);
+  prev.unshift(entry);
+  try {
+    localStorage.setItem(
+      RECENT_PLANS_KEY,
+      JSON.stringify(prev.slice(0, MAX_RECENT_PLANS))
+    );
+  } catch (_) {}
+}
+
+export async function joinPlanSession(id, d, toastFn) {
+  if (!id) return;
+  const loc = new URL(window.location.href);
+  loc.searchParams.set('plan', id);
+  window.history.replaceState({}, '', loc);
+  recordRecentPlan(id);
+  try {
+    await startPlanSession(id, d);
+    toastFn?.('Joined shared plan');
+  } catch {
+    toastFn?.('Could not join — check PartyKit meta and reload');
+  }
+}
+
 export async function startPlanSession(id, d) {
   if (ws) {
     try {
@@ -260,6 +381,7 @@ export async function startPlanSession(id, d) {
   planId = id;
   deps = d;
   syncedRevision = 0;
+  recordRecentPlan(id, d.getState()?.layout?.name);
   bindDisplayNameInput();
 
   let snap = await fetchPlanSnapshot(id);
@@ -377,13 +499,44 @@ function sendLayoutPayload() {
   );
 }
 
+function flushLayoutSyncTimers() {
+  if (commitTimer) {
+    clearTimeout(commitTimer);
+    commitTimer = null;
+  }
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+}
+
+/** Debounced layout broadcast after committed edits (undo, property changes, drag end). */
 export function onLocalEdit() {
+  scheduleLayoutSync({ immediate: false });
+}
+
+/** Throttled layout broadcast while dragging or resizing (live furniture sync). */
+export function onLayoutPreview() {
   if (!planId || !deps) return;
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    previewTimer = null;
+    requestAnimationFrame(() => sendLayoutPayload());
+  }, LAYOUT_PREVIEW_MS);
+}
+
+export function scheduleLayoutSync({ immediate = false } = {}) {
+  if (!planId || !deps) return;
+  if (immediate) {
+    flushLayoutSyncTimers();
+    requestAnimationFrame(() => sendLayoutPayload());
+    return;
+  }
   if (commitTimer) clearTimeout(commitTimer);
   commitTimer = setTimeout(() => {
     commitTimer = null;
     requestAnimationFrame(() => sendLayoutPayload());
-  }, 400);
+  }, LAYOUT_COMMIT_MS);
 }
 
 export function presenceTick(worldX, worldY) {
@@ -534,6 +687,7 @@ export async function shareNewPlan(d, toastFn) {
   } catch {
     toastFn?.(`Share link: ?plan=${id}`);
   }
+  recordRecentPlan(id);
   try {
     await startPlanSession(id, d);
   } catch {

@@ -77,8 +77,7 @@
           </button>
           <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
           <span class="sep sep-more-tools" aria-hidden="true"></span>
-          <button type="button" class="btn" id="btn-save" role="menuitem" title="Save (⌘S)">Save</button>
-          <input type="text" id="save-name" class="toolbar-save-name" value="autosave" title="Save slot name" aria-label="Save slot name">
+          <button type="button" class="btn" id="btn-save" role="menuitem" title="Save local copy (⌘S)">Save locally</button>
           <button type="button" class="btn" id="btn-export" role="menuitem" title="Export JSON">Export</button>
           <button type="button" class="btn" id="btn-import" role="menuitem">Import</button>
           <button type="button" class="btn toolbar-compact-text" id="btn-clear" role="menuitem" title="Clear floorplan — empty canvas (⌘⇧N)">
@@ -104,10 +103,14 @@
       <p class="panel-hint">Drag items onto the floor</p>
       <div id="catalog-list" class="panel-section panel-scroll"></div>
 
-      <h2>Saved layouts</h2>
-      <div id="save-panel" class="panel-section panel-scroll">
-        <p class="empty-state save-hint">Click a save below to load. Use Save in the toolbar to write the current slot.</p>
-        <div id="save-list"></div>
+      <h2>Sessions</h2>
+      <div id="sessions-panel" class="panel-section panel-scroll">
+        <p class="panel-hint">Shared plans sync live in the cloud. Local copies are for backup and offline work.</p>
+        <h3 class="panel-subhead">Recent shared</h3>
+        <div id="recent-sessions-list"></div>
+        <button type="button" class="btn btn-block session-leave hidden" id="btn-leave-session" title="Stop syncing and work offline">Leave shared session</button>
+        <h3 class="panel-subhead">Restore locally</h3>
+        <div id="local-restore-list"></div>
       </div>
       </div>
     </aside>
@@ -192,7 +195,8 @@
         <li><strong>Double-click label</strong> — Focus label text field</li>
         <li><strong>Drag label</strong> — Reposition on canvas</li>
         <li><strong>+ Label</strong> — Add label, then click canvas</li>
-        <li><strong>⌘S</strong> — Save to local storage</li>
+        <li><strong>⌘S</strong> — Save local copy</li>
+        <li><strong>Sessions panel</strong> — Rejoin recent shared plans or restore local draft</li>
         <li><strong>⌘⇧N</strong> — Clear floorplan (blank canvas)</li>
         <li><strong>Reset</strong> — Restore default apartment layout</li>
         <li><strong>⌘Z / ⌘⇧Z</strong> — Undo / redo</li>

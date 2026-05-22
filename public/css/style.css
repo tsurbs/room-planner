@@ -412,8 +412,32 @@ body {
   flex: 2 1 0;
 }
 
-.panel-left #save-panel {
+.panel-left #sessions-panel {
   flex: 1 1 0;
+}
+
+.panel-subhead {
+  margin: 10px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.session-item--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.btn-block {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 8px 12px 4px;
+}
+
+.session-leave {
+  font-size: 12px;
 }
 
 .panel-search {

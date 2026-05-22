@@ -63,14 +63,6 @@ function onMqChange(e) {
   else unbindMobile();
 }
 
-/** First mobile visit with no saved panel prefs — start with full canvas. */
-function seedMobilePanels() {
-  if (!mql.matches || sessionStorage.getItem('room-planner-panels')) return;
-  ['left', 'right'].forEach((side) => {
-    if (panelOpen(side)) document.getElementById(`btn-panel-${side}`)?.click();
-  });
-}
-
 function whenAppReady(fn) {
   if (appEl()) {
     fn();
@@ -102,7 +94,6 @@ function waitForAppInit(cb) {
 
 whenAppReady(() => {
   waitForAppInit(() => {
-    seedMobilePanels();
     if (mql.matches) bindMobile();
   });
   mql.addEventListener('change', onMqChange);
