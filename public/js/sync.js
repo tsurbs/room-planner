@@ -107,7 +107,8 @@ export function getDisplayName() {
 
 export function bindDisplayNameInput() {
   const inp = document.querySelector('#sync-display-name');
-  if (!inp) return;
+  if (!inp || inp.dataset.rpSyncBound === '1') return;
+  inp.dataset.rpSyncBound = '1';
   const saved = sessionStorage.getItem(SESSION_NAME_KEY);
   if (saved) inp.value = saved;
   inp.addEventListener('change', () => {
@@ -126,14 +127,25 @@ function colorForPeer(id) {
   return `hsl(${(h >>> 0) % 360}, 65%, 42%)`;
 }
 
-function setBadge(text, mode = '') {
+export function updateSyncBadge(text, mode = '') {
   const el = document.querySelector('#sync-badge');
-  if (!el) return;
-  el.textContent = text;
-  el.classList.remove('sync-badge--ok', 'sync-badge--warn', 'sync-badge--bad');
-  if (mode === 'ok') el.classList.add('sync-badge--ok');
-  else if (mode === 'warn') el.classList.add('sync-badge--warn');
-  else if (mode === 'bad') el.classList.add('sync-badge--bad');
+  if (el) {
+    el.textContent = text;
+    el.classList.remove('sync-badge--ok', 'sync-badge--warn', 'sync-badge--bad');
+    if (mode === 'ok') el.classList.add('sync-badge--ok');
+    else if (mode === 'warn') el.classList.add('sync-badge--warn');
+    else if (mode === 'bad') el.classList.add('sync-badge--bad');
+  }
+  const share = document.querySelector('#btn-share');
+  if (!share) return;
+  if (mode === 'ok') share.setAttribute('data-sync-state', 'ok');
+  else if (mode === 'warn') share.setAttribute('data-sync-state', 'warn');
+  else if (mode === 'bad') share.setAttribute('data-sync-state', 'bad');
+  else share.setAttribute('data-sync-state', 'idle');
+}
+
+function setBadge(text, mode = '') {
+  updateSyncBadge(text, mode);
 }
 
 function updateBadgeFromWs() {

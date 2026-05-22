@@ -11,89 +11,123 @@
   <link rel="stylesheet" href="css/style.css">
   <link rel="stylesheet" href="css/mobile.css" media="(max-width: 768px)">
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="https://unpkg.com/lucide@0.503.0/dist/umd/lucide.min.js" defer></script>
 </head>
 <body>
   <div class="app">
     <header class="toolbar">
-      <div class="toolbar-inner">
-      <span class="brand" title="Room Planner">Room Planner</span>
-      <span class="sep sep-brand"></span>
-      <div class="toolbar-group toolbar-group--sync">
-        <button type="button" class="btn toolbar-compact-text" id="btn-share" title="Create share link (cloud snapshot + live cursors)">
-          <span class="btn-label-full">Share</span>
-          <span class="btn-label-short" aria-hidden="true">⎘</span>
-        </button>
-        <span class="sync-badge" id="sync-badge" title="Sync status">Local</span>
-        <label class="sync-name-label" title="Nickname shown to collaborators">
-          <span class="sync-name-hint">Name</span>
-          <input type="text" id="sync-display-name" class="sync-display-name" maxlength="32" placeholder="Guest" autocomplete="nickname">
-        </label>
+      <div class="toolbar-leading">
+        <span class="brand" title="Room Planner">
+          <span class="brand-long">Room Planner</span>
+          <span class="brand-short">RP</span>
+        </span>
       </div>
-      <span class="sep sep-sync"></span>
-      <div class="toolbar-group toolbar-group--modes">
-        <button type="button" class="btn active" id="btn-mode-furnish" data-mode="furnish" title="Furnish (V)">
-          <span class="btn-label-full">Furnish</span>
-          <span class="btn-label-short" aria-hidden="true">Furn.</span>
-        </button>
-        <button type="button" class="btn" id="btn-mode-walls" data-mode="walls" title="Edit floorplan (E)">
-          <span class="btn-label-full">Edit floorplan</span>
-          <span class="btn-label-short" aria-hidden="true">Floor</span>
-        </button>
-      </div>
-      <span class="sep sep-modes"></span>
-      <div class="toolbar-group toolbar-group--panels">
-        <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-left" title="Toggle catalog ({)" aria-pressed="false" aria-controls="panel-left">◧</button>
-        <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-right" title="Toggle properties (})" aria-pressed="false" aria-controls="panel-right">◨</button>
-      </div>
-      <span class="sep sep-panels"></span>
-      <div class="toolbar-group toolbar-group--history">
-        <button type="button" class="btn icon" id="btn-undo" title="Undo (⌘Z)" disabled>↶</button>
-        <button type="button" class="btn icon" id="btn-redo" title="Redo (⌘⇧Z)" disabled>↷</button>
-      </div>
-      <span class="sep sep-file"></span>
-      </div>
-      <div class="toolbar-more" id="toolbar-more">
-        <button
-          type="button"
-          class="btn icon toolbar-more-trigger"
-          id="btn-toolbar-more"
-          aria-expanded="false"
-          aria-haspopup="menu"
-          aria-controls="toolbar-more-menu"
-          title="More actions"
-        >⋯</button>
-        <div class="toolbar-more-menu" id="toolbar-more-menu" role="menu">
-          <button type="button" class="btn icon toolbar-compact-text" id="btn-add-wall" role="menuitem" title="Draw wall — Shift+drag in edit mode">
-            <span class="btn-label-full">+ Wall</span>
-            <span class="btn-label-short" aria-hidden="true">+</span>
+
+      <div class="toolbar-dock" aria-label="Editing tools">
+        <div class="toolbar-group toolbar-group--modes toolbar-segmented" role="group" aria-label="Canvas mode">
+          <button type="button" class="btn icon active" id="btn-mode-furnish" data-mode="furnish" title="Furnish (V)" aria-label="Furnish mode">
+            <i data-lucide="sofa" class="btn-icon" aria-hidden="true"></i>
           </button>
-          <button type="button" class="btn icon toolbar-compact-text" id="btn-add-label" role="menuitem" title="Add room label — click canvas (furnish mode)">
-            <span class="btn-label-full">+ Label</span>
-            <span class="btn-label-short" aria-hidden="true">L</span>
+          <button type="button" class="btn icon" id="btn-mode-walls" data-mode="walls" title="Edit floorplan (E)" aria-label="Edit floorplan mode">
+            <i data-lucide="pencil-ruler" class="btn-icon" aria-hidden="true"></i>
           </button>
-          <button type="button" class="btn icon toolbar-compact-text" id="btn-trace-image" role="menuitem" title="Trace image — upload PNG/JPG or paste from clipboard">
-            <span class="btn-label-full">Trace image</span>
-            <span class="btn-label-short" aria-hidden="true">Img</span>
+        </div>
+        <div class="toolbar-group toolbar-group--panels">
+          <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-left" title="Toggle catalog ({)" aria-pressed="false" aria-controls="panel-left" aria-label="Toggle catalog panel">
+            <i data-lucide="panel-left" class="btn-icon" aria-hidden="true"></i>
           </button>
-          <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
-          <span class="sep sep-more-tools" aria-hidden="true"></span>
-          <button type="button" class="btn" id="btn-save" role="menuitem" title="Save local copy (⌘S)">Save locally</button>
-          <button type="button" class="btn" id="btn-export" role="menuitem" title="Export JSON">Export</button>
-          <button type="button" class="btn" id="btn-import" role="menuitem">Import</button>
-          <button type="button" class="btn toolbar-compact-text" id="btn-clear" role="menuitem" title="Clear floorplan — empty canvas (⌘⇧N)">
-            <span class="btn-label-full">Clear floorplan</span>
-            <span class="btn-label-short" aria-hidden="true">Clear</span>
+          <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-right" title="Toggle properties (})" aria-pressed="false" aria-controls="panel-right" aria-label="Toggle properties panel">
+            <i data-lucide="panel-right" class="btn-icon" aria-hidden="true"></i>
           </button>
-          <button type="button" class="btn" id="btn-reset" role="menuitem" title="Restore default 2BR apartment reference layout">Reset</button>
+        </div>
+        <div class="toolbar-group toolbar-group--history">
+          <button type="button" class="btn icon" id="btn-undo" title="Undo (⌘Z)" aria-label="Undo" disabled>
+            <i data-lucide="undo-2" class="btn-icon" aria-hidden="true"></i>
+          </button>
+          <button type="button" class="btn icon" id="btn-redo" title="Redo (⌘⇧Z)" aria-label="Redo" disabled>
+            <i data-lucide="redo-2" class="btn-icon" aria-hidden="true"></i>
+          </button>
         </div>
       </div>
-      <span class="spacer"></span>
-      <span class="hint">V furnish · E walls · Trace image · ⌫ delete</span>
+
+      <div class="toolbar-trailing">
+        <div class="toolbar-group toolbar-group--sync">
+          <button type="button" class="btn icon btn-share" id="btn-share" data-sync-state="idle" title="Create share link (cloud snapshot + live cursors)" aria-label="Share">
+            <i data-lucide="share-2" class="btn-icon" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="toolbar-more" id="toolbar-more">
+          <button
+            type="button"
+            class="btn icon toolbar-more-trigger"
+            id="btn-toolbar-more"
+            aria-expanded="false"
+            aria-haspopup="menu"
+            aria-controls="toolbar-more-menu"
+            title="More actions"
+            aria-label="More actions"
+          >
+            <i data-lucide="ellipsis" class="btn-icon" aria-hidden="true"></i>
+          </button>
+          <div class="toolbar-more-menu" id="toolbar-more-menu" role="menu">
+            <div class="toolbar-menu-section" role="presentation">
+              <div class="toolbar-menu-heading">Collaboration</div>
+              <span class="sync-badge" id="sync-badge" title="Sync status">Local</span>
+              <label class="sync-name-label sync-name-row" title="Nickname shown to collaborators">
+                <span class="sync-name-hint">Display name</span>
+                <input type="text" id="sync-display-name" class="sync-display-name" maxlength="32" placeholder="Guest" autocomplete="nickname">
+              </label>
+            </div>
+            <div class="toolbar-menu-section" role="presentation">
+              <div class="toolbar-menu-heading">Draw</div>
+              <button type="button" class="btn toolbar-menu-row" id="btn-add-wall" role="menuitem" title="Draw wall — Shift+drag in edit mode">
+                <i data-lucide="brick-wall" class="btn-icon" aria-hidden="true"></i>
+                <span>Add wall</span>
+              </button>
+              <button type="button" class="btn toolbar-menu-row" id="btn-add-label" role="menuitem" title="Add room label — click canvas (furnish mode)">
+                <i data-lucide="tag" class="btn-icon" aria-hidden="true"></i>
+                <span>Add label</span>
+              </button>
+              <button type="button" class="btn toolbar-menu-row" id="btn-trace-image" role="menuitem" title="Trace image — upload PNG/JPG or paste from clipboard">
+                <i data-lucide="image-up" class="btn-icon" aria-hidden="true"></i>
+                <span>Trace image</span>
+              </button>
+              <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
+            </div>
+            <div class="toolbar-menu-section" role="presentation">
+              <div class="toolbar-menu-heading">File</div>
+              <button type="button" class="btn toolbar-menu-row" id="btn-save" role="menuitem" title="Save local copy (⌘S)">
+                <i data-lucide="save" class="btn-icon" aria-hidden="true"></i>
+                <span>Save locally</span>
+              </button>
+              <button type="button" class="btn toolbar-menu-row" id="btn-export" role="menuitem" title="Export JSON">
+                <i data-lucide="download" class="btn-icon" aria-hidden="true"></i>
+                <span>Export</span>
+              </button>
+              <button type="button" class="btn toolbar-menu-row" id="btn-import" role="menuitem">
+                <i data-lucide="upload" class="btn-icon" aria-hidden="true"></i>
+                <span>Import</span>
+              </button>
+              <button type="button" class="btn toolbar-menu-row" id="btn-reset" role="menuitem" title="Restore default 2BR apartment reference layout">
+                <i data-lucide="rotate-ccw" class="btn-icon" aria-hidden="true"></i>
+                <span>Reset layout</span>
+              </button>
+            </div>
+            <div class="toolbar-menu-section toolbar-menu-section--danger" role="presentation">
+              <div class="toolbar-menu-heading">Danger</div>
+              <button type="button" class="btn toolbar-menu-row" id="btn-clear" role="menuitem" title="Clear floorplan — empty canvas (⌘⇧N)">
+                <i data-lucide="eraser" class="btn-icon" aria-hidden="true"></i>
+                <span>Clear floorplan</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </header>
 
     <aside class="panel panel-left" id="panel-left">
       <button type="button" class="panel-toggle" id="panel-toggle-left" title="Toggle catalog ({)" aria-label="Toggle catalog" aria-expanded="true">
-        <span class="panel-toggle-icon" aria-hidden="true">‹</span>
+        <span class="panel-toggle-icon" aria-hidden="true"><i data-lucide="chevron-left" class="btn-icon"></i></span>
       </button>
       <div class="panel-body">
       <h2>Catalog</h2>
@@ -121,7 +155,7 @@
 
     <aside class="panel panel-right" id="panel-right">
       <button type="button" class="panel-toggle" id="panel-toggle-right" title="Toggle properties (})" aria-label="Toggle properties" aria-expanded="true">
-        <span class="panel-toggle-icon" aria-hidden="true">›</span>
+        <span class="panel-toggle-icon" aria-hidden="true"><i data-lucide="chevron-right" class="btn-icon"></i></span>
       </button>
       <div class="panel-body">
       <h2

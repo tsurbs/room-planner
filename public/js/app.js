@@ -149,6 +149,25 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
+function initToolbarIcons() {
+  const L = typeof globalThis !== 'undefined' ? globalThis.lucide : null;
+  if (!L?.createIcons) return;
+  try {
+    L.createIcons({
+      attrs: {
+        stroke: 'currentColor',
+        'stroke-width': 2,
+      },
+    });
+  } catch {
+    L.createIcons();
+  }
+}
+
+function setAppModalOpen(on) {
+  document.querySelector('.app')?.classList.toggle('app-modal-open', !!on);
+}
+
 function setStatus(text) {
   $('#status-msg').textContent = text;
 }
@@ -827,6 +846,7 @@ function exportJson() {
   const json = JSON.stringify(state.layout, null, 2);
   $('#export-text').value = json;
   $('#modal-export').classList.remove('hidden');
+  setAppModalOpen(true);
 }
 
 function importJson(text) {
@@ -838,6 +858,7 @@ function importJson(text) {
     pushHistory();
     render();
     $('#modal-import').classList.add('hidden');
+    setAppModalOpen(false);
     toast('Layout imported');
   } catch (e) {
     toast('Import failed: ' + e.message);
@@ -2411,6 +2432,7 @@ function bindToolbarMore() {
 }
 
 function bindUI() {
+  initToolbarIcons();
   bindToolbarMore();
   $('#btn-mode-furnish')?.addEventListener('click', () => setMode('furnish'));
   $('#btn-mode-walls')?.addEventListener('click', () => setMode('walls'));
@@ -2421,6 +2443,7 @@ function bindUI() {
   $('#btn-import')?.addEventListener('click', () => {
     $('#import-text').value = '';
     $('#modal-import').classList.remove('hidden');
+    setAppModalOpen(true);
   });
   $('#btn-reset')?.addEventListener('click', resetDefault);
   $('#btn-clear')?.addEventListener('click', clearFloorplan);
@@ -2473,8 +2496,14 @@ function bindUI() {
     }
   });
   $('#import-confirm')?.addEventListener('click', () => importJson($('#import-text').value));
-  $('#import-cancel')?.addEventListener('click', () => $('#modal-import').classList.add('hidden'));
-  $('#export-close')?.addEventListener('click', () => $('#modal-export').classList.add('hidden'));
+  $('#import-cancel')?.addEventListener('click', () => {
+    $('#modal-import').classList.add('hidden');
+    setAppModalOpen(false);
+  });
+  $('#export-close')?.addEventListener('click', () => {
+    $('#modal-export').classList.add('hidden');
+    setAppModalOpen(false);
+  });
   $('#export-copy')?.addEventListener('click', async () => {
     await navigator.clipboard.writeText($('#export-text').value);
     toast('Copied to clipboard');
@@ -2585,6 +2614,7 @@ async function init() {
 
   bindUI();
   bindHotkeys();
+  sync.bindDisplayNameInput();
   refreshSessionsPanel();
   applyPanelState();
   ensureMobileLayout();
