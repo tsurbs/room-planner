@@ -50,6 +50,89 @@ function handleMetrics() {
   return { hs, hSize, wallR, rotR, rotOff };
 }
 
+function itemSelectionTransform(item) {
+  const p = worldToScreen(item.x, item.y);
+  const pw = ftToPx(item.w);
+  const ph = ftToPx(item.h);
+  const rot = item.rotation || 0;
+  return {
+    transform: `translate(${p.x},${p.y}) rotate(${rot},${pw / 2},${ph / 2})`,
+    pw,
+    ph,
+  };
+}
+
+/** Resize/rotate handles on a top layer so room labels cannot block pointer hits. */
+function appendItemSelectionHandles(g, pw, ph) {
+  g.appendChild(
+    el('rect', {
+      x: -1,
+      y: -1,
+      width: pw + 2,
+      height: ph + 2,
+      fill: 'none',
+      stroke: 'var(--selection)',
+      'stroke-width': 1.5,
+      'pointer-events': 'none',
+    })
+  );
+  const { hs, hSize, rotR, rotOff } = handleMetrics();
+  const rotHitR = rotR + (isMobileTouchUI() ? 10 : 6);
+  [
+    { x: 0, y: 0, corner: 'nw' },
+    { x: pw, y: 0, corner: 'ne' },
+    { x: 0, y: ph, corner: 'sw' },
+    { x: pw, y: ph, corner: 'se' },
+  ].forEach((h) => {
+    g.appendChild(
+      el('rect', {
+        x: h.x - hs,
+        y: h.y - hs,
+        width: hSize,
+        height: hSize,
+        class: 'resize-handle',
+        'data-resize': h.corner,
+      })
+    );
+  });
+  g.appendChild(
+    el('circle', {
+      cx: pw / 2,
+      cy: -rotOff,
+      r: rotR,
+      class: 'rotate-handle',
+      'data-rotate': '1',
+      'pointer-events': 'none',
+    })
+  );
+  g.appendChild(
+    el('circle', {
+      cx: pw / 2,
+      cy: -rotOff,
+      r: rotHitR,
+      fill: 'rgba(0,0,0,0.01)',
+      class: 'rotate-handle-hit',
+      'data-rotate': '1',
+    })
+  );
+}
+
+function renderItemSelectionOverlay(svg) {
+  if (state.mode !== 'furnish' || state.selection.length !== 1) return;
+  const sel = primarySelection();
+  if (sel?.kind !== 'item') return;
+  const item = getItem(sel.id);
+  if (!item) return;
+  const { transform, pw, ph } = itemSelectionTransform(item);
+  const g = el('g', {
+    class: 'selection-handles-layer',
+    'data-item-id': item.id,
+    transform,
+  });
+  appendItemSelectionHandles(g, pw, ph);
+  svg.appendChild(g);
+}
+
 const $ = (sel) => document.querySelector(sel);
 const canvas = () => $('#floor-canvas');
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -113,6 +196,22 @@ function ensureMobileLayout() {
   fitPlanToView();
 }
 
+/** Hide catalog/properties overlays so the canvas is tappable. */
+function collapseMobilePanelsForCanvas() {
+  if (!isMobileTouchUI()) return;
+  let changed = false;
+  ['left', 'right'].forEach((side) => {
+    if (!state.panels[side]) {
+      state.panels[side] = true;
+      changed = true;
+    }
+  });
+  if (changed) {
+    savePanelState();
+    applyPanelState();
+  }
+}
+
 function togglePanel(side) {
   if (side !== 'left' && side !== 'right') return;
   state.panels[side] = !state.panels[side];
@@ -130,6 +229,10 @@ function pxToFt(v) {
 
 function snapFt(v, grid = 0.25) {
   return Math.round(v / grid) * grid;
+}
+
+function snapRotationDeg(deg, step) {
+  return (((Math.round(deg / step) * step) % 360) + 360) % 360;
 }
 
 const LAYOUT_DRAG_SYNC = new Set([
@@ -1063,8 +1166,6 @@ function render() {
     const cat = CATALOG[item.type] || { label: item.type };
     const sel = isSelected('item', item.id);
     const rot = item.rotation || 0;
-    const cx = item.x + item.w / 2;
-    const cy = item.y + item.h / 2;
     const p = worldToScreen(item.x, item.y);
     const pw = ftToPx(item.w);
     const ph = ftToPx(item.h);
@@ -1095,55 +1196,13 @@ function render() {
     label.textContent = cat.label.split(' ')[0];
     g.appendChild(label);
 
-    if (sel && state.mode === 'furnish' && state.selection.length === 1) {
-      g.appendChild(
-        el('rect', {
-          x: -1,
-          y: -1,
-          width: pw + 2,
-          height: ph + 2,
-          fill: 'none',
-          stroke: 'var(--selection)',
-          'stroke-width': 1.5,
-          'pointer-events': 'none',
-        })
-      );
-      const { hs, hSize, rotR, rotOff } = handleMetrics();
-      const handles = [
-        { x: 0, y: 0, corner: 'nw' },
-        { x: pw, y: 0, corner: 'ne' },
-        { x: 0, y: ph, corner: 'sw' },
-        { x: pw, y: ph, corner: 'se' },
-      ];
-      handles.forEach((h) => {
-        g.appendChild(
-          el('rect', {
-            x: h.x - hs,
-            y: h.y - hs,
-            width: hSize,
-            height: hSize,
-            class: 'resize-handle',
-            'data-resize': h.corner,
-          })
-        );
-      });
-      g.appendChild(
-        el('circle', {
-          cx: pw / 2,
-          cy: -rotOff,
-          r: rotR,
-          class: 'rotate-handle',
-          'data-rotate': '1',
-        })
-      );
-    }
-
     gItems.appendChild(g);
   });
   svg.appendChild(gItems);
   svg.appendChild(gLabels);
 
   sync.renderPeers(svg, worldToScreen);
+  renderItemSelectionOverlay(svg);
 
   const bgNote = getBackgroundImage()?.src ? ' · trace image' : '';
   setStatus(
@@ -1443,9 +1502,50 @@ function revertPendingDrag() {
   state.dragPending = null;
 }
 
-function handleMobileTap(evt) {
+/** Finish a click that never promoted to drag — keep selection, don't clear on release outside. */
+function finalizePendingPointer(evt, pending) {
+  if (!pending) return;
+  const hit = hitTest(evt);
+  if (pending.type === 'item-move') {
+    if (hit?.kind === 'item') selectHit(hit, false);
+    else selectOne('item', pending.id);
+    return;
+  }
+  if (pending.type === 'label-move') {
+    if (hit?.kind === 'label') {
+      const now = Date.now();
+      if (state.lastLabelTap.id === hit.id && now - state.lastLabelTap.t < 400) {
+        selectOne('label', hit.id);
+        focusLabelNameField();
+        state.lastLabelTap = { id: null, t: 0 };
+        return;
+      }
+      state.lastLabelTap = { id: hit.id, t: now };
+    } else {
+      state.lastLabelTap = { id: null, t: 0 };
+    }
+    selectOne('label', pending.id);
+    return;
+  }
+  if (pending.type === 'bg-move') {
+    if (hit?.kind === 'background') selectOne('background', BG_TRACE_ID);
+    return;
+  }
+  if (pending.type === 'wall-move') {
+    if (hit?.kind === 'wall') selectHit(hit, false);
+    else selectOne('wall', pending.id);
+    return;
+  }
+  if (pending.type === 'pan' && !hit) {
+    clearSelection();
+  }
+}
+
+function handleMobileTap(evt, pending = null) {
   const pt = getSvgPoint(evt);
   const hit = hitTest(evt);
+
+  if (pending) return;
 
   if (state.placingCatalogType && state.mode === 'furnish' && !hit) {
     const cat = CATALOG[state.placingCatalogType];
@@ -1501,12 +1601,10 @@ function touchMidAndDist(touches) {
 function applyPinchFrame(mid, dist) {
   const p = state.pinch;
   if (!p || dist < 1) return;
-  const newZoom = Math.min(2.5, Math.max(0.4, p.startZoom * (dist / p.startDist)));
-  state.pan.x = p.startPan.x + (mid.x - p.startMid.x);
-  state.pan.y = p.startPan.y + (mid.y - p.startMid.y);
-  state.zoom = newZoom;
   const svgPt = clientToSvg(mid.x, mid.y);
   const world = screenToWorld(svgPt.x, svgPt.y);
+  const newZoom = Math.min(2.5, Math.max(0.4, p.startZoom * (dist / p.startDist)));
+  state.zoom = newZoom;
   state.pan.x = svgPt.x - ftToPx(world.x);
   state.pan.y = svgPt.y - ftToPx(world.y);
   render();
@@ -1521,9 +1619,7 @@ function beginPinchGesture(touches) {
   const { mid, dist } = touchMidAndDist(touches);
   state.pinch = {
     startDist: dist,
-    startMid: { ...mid },
     startZoom: state.zoom,
-    startPan: { ...state.pan },
   };
 }
 
@@ -1577,7 +1673,16 @@ function hitTest(evt) {
     target.closest?.('[data-label-id]')?.getAttribute('data-label-id');
   if (labelId) return { kind: 'label', id: labelId };
   const itemId = target.closest?.('[data-item-id]')?.getAttribute('data-item-id');
-  if (itemId) return { kind: 'item', id: itemId, resize: target.dataset.resize, rotate: target.dataset.rotate };
+  if (itemId) {
+    const resizeEl = target.closest?.('[data-resize]');
+    const rotateEl = target.closest?.('[data-rotate]');
+    return {
+      kind: 'item',
+      id: itemId,
+      resize: resizeEl?.getAttribute('data-resize') || undefined,
+      rotate: rotateEl ? true : undefined,
+    };
+  }
   const wallId = target.getAttribute?.('data-wall-id');
   if (wallId) {
     return {
@@ -1729,8 +1834,14 @@ function onPointerDown(evt) {
         return;
       }
       if (!isMobileTouchUI()) {
-        if (!isSelected('item', hit.id)) selectHit(hit, evt.shiftKey);
-        else if (evt.shiftKey) selectHit(hit, true);
+        const onHandle = hit.resize || hit.rotate;
+        if (onHandle) {
+          if (!isSelected('item', hit.id)) selectOne('item', hit.id);
+        } else if (!isSelected('item', hit.id)) {
+          selectHit(hit, evt.shiftKey);
+        } else if (evt.shiftKey) {
+          selectHit(hit, true);
+        }
       }
 
       const target = getItem(hit.id);
@@ -1754,6 +1865,9 @@ function onPointerDown(evt) {
           {
             type: 'rotate-drag',
             id: hit.id,
+            start: pt,
+            centerX: cx,
+            centerY: cy,
             startAngle: Math.atan2(world.y - cy, world.x - cx),
             origRot: target.rotation || 0,
           },
@@ -1767,9 +1881,6 @@ function onPointerDown(evt) {
             const it = getItem(s.id);
             if (it) origins[s.id] = { x: it.x, y: it.y };
           });
-        if (isMobileTouchUI() && !isSelected('item', hit.id)) {
-          selectOne('item', hit.id);
-        }
         assignDrag(
           {
             type: 'item-move',
@@ -1843,8 +1954,9 @@ function onPointerMove(evt) {
   }
   hideWallLengthTip();
   const pt = getSvgPoint(evt);
-  const dx = pt.x - state.drag.start.x;
-  const dy = pt.y - state.drag.start.y;
+  const dragStart = state.drag.start;
+  const dx = dragStart ? pt.x - dragStart.x : 0;
+  const dy = dragStart ? pt.y - dragStart.y : 0;
 
   if (state.drag.type === 'pan') {
     state.pan.x = state.drag.origPan.x + dx;
@@ -1920,12 +2032,16 @@ function onPointerMove(evt) {
 
   if (state.drag.type === 'rotate-drag') {
     const item = getItem(state.drag.id);
-    const cx = item.x + item.w / 2;
-    const cy = item.y + item.h / 2;
+    const cx = state.drag.centerX ?? item.x + item.w / 2;
+    const cy = state.drag.centerY ?? item.y + item.h / 2;
     const world = screenToWorld(pt.x, pt.y);
     const angle = Math.atan2(world.y - cy, world.x - cx);
-    const delta = ((angle - state.drag.startAngle) * 180) / Math.PI;
-    item.rotation = Math.round(state.drag.origRot + delta);
+    let delta = ((angle - state.drag.startAngle) * 180) / Math.PI;
+    while (delta > 180) delta -= 360;
+    while (delta < -180) delta += 360;
+    let rotation = ((state.drag.origRot + delta) % 360 + 360) % 360;
+    if (evt.shiftKey) rotation = snapRotationDeg(rotation, 15);
+    item.rotation = rotation;
     renderDuringLayoutDrag();
     return;
   }
@@ -2027,12 +2143,17 @@ function onPointerUp(evt) {
   if (state.pinch) return;
 
   if (state.dragPending && !state.drag) {
-    if (isMobileTouchUI()) handleMobileTap(evt);
+    const pending = state.dragPending;
+    finalizePendingPointer(evt, pending);
     revertPendingDrag();
     try {
       canvas()?.releasePointerCapture(evt.pointerId);
     } catch (_) {}
     return;
+  }
+
+  if (!state.drag && isMobileTouchUI()) {
+    handleMobileTap(evt);
   }
 
   if (state.drag) {
@@ -2093,7 +2214,7 @@ function onPointerUp(evt) {
         }
       } else if (drag.type === 'rotate-drag') {
         const item = getItem(drag.id);
-        if (item) item.rotation = Math.round((item.rotation || 0) / 5) * 5;
+        if (item) item.rotation = snapRotationDeg(item.rotation || 0, evt.shiftKey ? 15 : 5);
       }
       if (dragMutatedLayout(drag)) pushHistory();
     }
@@ -2189,6 +2310,7 @@ function buildCatalog() {
       cancelPlacingLabel();
       state.placingCatalogType = btn.dataset.type;
       $('.canvas-wrap')?.classList.add('placing-item');
+      collapseMobilePanelsForCanvas();
       toast(`Tap the floor to place ${btn.dataset.label}`);
     });
   });
@@ -2306,6 +2428,7 @@ function bindUI() {
     setMode('walls');
     if (isMobileTouchUI()) {
       state.wallDrawTool = true;
+      collapseMobilePanelsForCanvas();
       toast('Drag on the canvas to draw a wall');
     } else {
       toast('Shift+drag on canvas to draw a new wall');
@@ -2316,6 +2439,7 @@ function bindUI() {
     cancelPlacingCatalog();
     state.placingLabel = true;
     $('.canvas-wrap')?.classList.add('placing-label');
+    if (isMobileTouchUI()) collapseMobilePanelsForCanvas();
     toast(isMobileTouchUI() ? 'Tap the canvas to place a label' : 'Click the canvas to place a label');
   });
   $('#btn-trace-image')?.addEventListener('click', () => {

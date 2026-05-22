@@ -890,6 +890,11 @@ body {
   cursor: nesw-resize;
 }
 
+.selection-handles-layer .resize-handle,
+.selection-handles-layer .rotate-handle-hit {
+  pointer-events: all;
+}
+
 .resize-handle,
 .rotate-handle {
   fill: var(--handle);
@@ -903,6 +908,7 @@ body {
   cursor: nesw-resize;
 }
 
+.rotate-handle-hit,
 .rotate-handle {
   cursor: grab;
 }
