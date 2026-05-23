@@ -28,7 +28,7 @@ let commitTimer = null;
 let previewTimer = null;
 /** @type {number | null} */
 let lastPresence = 0;
-/** @type {{ getState: () => any, render: () => void, pushHistory: () => void, cloneLayout: (l: any) => any, validateLayout: (l: any) => boolean, toast: (m: string) => void, updateUndoButtons: () => void } | null} */
+/** @type {{ getState: () => any, render: () => void, pushHistory: () => void, cloneLayout: (l: any) => any, validateLayout: (l: any) => boolean, toast: (m: string) => void, updateUndoButtons: () => void, initSharedHistory: (l: any) => void, syncSharedBaseline: () => void } | null} */
 let deps = null;
 
 /** @type {Map<string, { worldX: number, worldY: number, name: string, color: string, dragging?: boolean, targetKind?: string, targetId?: string, at: number }>} */
@@ -325,8 +325,7 @@ function applyRemoteState(layout, revision, updatedAt) {
   const preservedSelection = filterSelectionToLayout(st.selection, nextLayout);
   st.layout = nextLayout;
   st.selection = preservedSelection;
-  st.history = [deps.cloneLayout(st.layout)];
-  st.historyIndex = 0;
+  deps.syncSharedBaseline();
   deps.updateUndoButtons();
   if (typeof revision === 'number') syncedRevision = revision;
   deps.render();
@@ -413,8 +412,7 @@ export async function startPlanSession(id, d) {
     st.layout = d.cloneLayout(snap.layout);
     st.selection = [];
     syncedRevision = typeof snap.revision === 'number' ? snap.revision : 1;
-    st.history = [d.cloneLayout(st.layout)];
-    st.historyIndex = 0;
+    d.initSharedHistory(st.layout);
     d.updateUndoButtons();
     d.render();
     cachePlan(id, st.layout, syncedRevision);
@@ -424,8 +422,7 @@ export async function startPlanSession(id, d) {
     st.layout = createEmptyLayout();
     st.selection = [];
     syncedRevision = 1;
-    st.history = [d.cloneLayout(st.layout)];
-    st.historyIndex = 0;
+    d.initSharedHistory(st.layout);
     d.updateUndoButtons();
     d.render();
     cachePlan(id, st.layout, syncedRevision);

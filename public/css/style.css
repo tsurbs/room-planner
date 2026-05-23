@@ -276,6 +276,7 @@ body {
 .btn.icon {
   padding: 5px 8px;
   min-width: 32px;
+  min-height: 30px;
   justify-content: center;
 }
 
@@ -289,6 +290,13 @@ body {
   width: 18px;
   height: 18px;
   flex-shrink: 0;
+}
+
+/* Preserve icon slot dimensions before lucide swaps <i> for <svg>. */
+.btn-icon {
+  display: inline-block;
+  vertical-align: middle;
+  box-sizing: content-box;
 }
 
 .btn svg.lucide {

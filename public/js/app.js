@@ -6,6 +6,12 @@ import {
   cloneLayout,
 } from './default-layout.js';
 import * as sync from './sync.js';
+import {
+  buildLayoutCommand,
+  applyInverse,
+  applyForward,
+  findApplicableCommand,
+} from './shared-history.js';
 
 const STORAGE_KEY = 'room-planner-layout';
 const STORAGE_SLOTS_KEY = 'room-planner-saves';
@@ -28,6 +34,12 @@ const state = {
   zoom: 1,
   history: [],
   historyIndex: -1,
+  /** @type {import('./shared-history.js').LayoutCommand[]} */
+  sharedUndo: [],
+  /** @type {import('./shared-history.js').LayoutCommand[]} */
+  sharedRedo: [],
+  /** Layout snapshot after last local committed edit (shared mode diff baseline). */
+  sharedBaseline: null,
   spaceHeld: false,
   catalogQuery: '',
   panels: { left: false, right: false },
@@ -149,9 +161,9 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
-function initToolbarIcons() {
-  const L = typeof globalThis !== 'undefined' ? globalThis.lucide : null;
-  if (!L?.createIcons) return;
+function paintToolbarIconsOnce() {
+  const L = globalThis.lucide;
+  if (!L?.createIcons) return false;
   try {
     L.createIcons({
       attrs: {
@@ -161,6 +173,20 @@ function initToolbarIcons() {
     });
   } catch {
     L.createIcons();
+  }
+  return true;
+}
+
+function initToolbarIcons() {
+  if (paintToolbarIconsOnce()) return;
+  if (typeof document !== 'undefined' && document.readyState !== 'complete') {
+    window.addEventListener(
+      'load',
+      () => {
+        paintToolbarIconsOnce();
+      },
+      { once: true },
+    );
   }
 }
 
@@ -266,17 +292,60 @@ const LAYOUT_DRAG_SYNC = new Set([
   'wall-draw',
 ]);
 
-function pushHistory() {
-  state.history = state.history.slice(0, state.historyIndex + 1);
-  state.history.push(cloneLayout(state.layout));
-  if (state.history.length > 50) state.history.shift();
-  else state.historyIndex++;
+const HISTORY_MAX = 50;
+
+function initSharedHistory(layout) {
+  state.sharedUndo = [];
+  state.sharedRedo = [];
+  state.sharedBaseline = cloneLayout(layout);
   updateUndoButtons();
+}
+
+function syncSharedBaseline() {
+  state.sharedBaseline = cloneLayout(state.layout);
+}
+
+function pushSharedHistory() {
+  const before = state.sharedBaseline || cloneLayout(state.layout);
+  const cmd = buildLayoutCommand(before, state.layout);
+  if (!cmd.changes.length) return;
+  state.sharedUndo.push(cmd);
+  if (state.sharedUndo.length > HISTORY_MAX) state.sharedUndo.shift();
+  state.sharedRedo = [];
+  syncSharedBaseline();
+  updateUndoButtons();
+  sync.scheduleLayoutSync({ immediate: true });
+}
+
+function pushHistory() {
   if (sync.isPlanSessionActive()) {
-    sync.scheduleLayoutSync({ immediate: true });
-  } else {
-    saveLocalDraft();
+    pushSharedHistory();
+    return;
   }
+  state.history = state.history.slice(0, state.historyIndex + 1);
+  const snap = cloneLayout(state.layout);
+  const tip = state.history[state.historyIndex];
+  if (tip && JSON.stringify(tip) === JSON.stringify(snap)) return;
+  state.history.push(snap);
+  if (state.history.length > HISTORY_MAX) {
+    state.history.shift();
+  } else {
+    state.historyIndex++;
+  }
+  updateUndoButtons();
+  saveLocalDraft();
+}
+
+function restoreHistoryIndex(index) {
+  if (index < 0 || index >= state.history.length) return false;
+  state.historyIndex = index;
+  state.layout = cloneLayout(state.history[index]);
+  state.selection = [];
+  render();
+  updateUndoButtons();
+  sync.onLocalEdit();
+  if (!sync.isPlanSessionActive()) saveLocalDraft();
+  return true;
 }
 
 function renderDuringLayoutDrag() {
@@ -286,31 +355,88 @@ function renderDuringLayoutDrag() {
   }
 }
 
-function undo() {
-  if (state.historyIndex <= 0) return;
-  state.historyIndex--;
-  state.layout = cloneLayout(state.history[state.historyIndex]);
+function sharedUndoApply() {
+  const hit = findApplicableCommand(state.sharedUndo, state.layout, 'undo');
+  if (!hit) return false;
+  state.sharedUndo.splice(hit.index, 1);
+  applyInverse(hit.cmd, state.layout);
+  state.sharedRedo.push(hit.cmd);
+  if (state.sharedRedo.length > HISTORY_MAX) state.sharedRedo.shift();
+  syncSharedBaseline();
   state.selection = [];
   render();
-  sync.onLocalEdit();
-  if (!sync.isPlanSessionActive()) saveLocalDraft();
+  updateUndoButtons();
+  sync.scheduleLayoutSync({ immediate: true });
+  return true;
+}
+
+function sharedRedoApply() {
+  const hit = findApplicableCommand(state.sharedRedo, state.layout, 'redo');
+  if (!hit) return false;
+  state.sharedRedo.splice(hit.index, 1);
+  applyForward(hit.cmd, state.layout);
+  state.sharedUndo.push(hit.cmd);
+  if (state.sharedUndo.length > HISTORY_MAX) state.sharedUndo.shift();
+  syncSharedBaseline();
+  state.selection = [];
+  render();
+  updateUndoButtons();
+  sync.scheduleLayoutSync({ immediate: true });
+  return true;
+}
+
+function undo() {
+  if (sync.isPlanSessionActive()) {
+    if (!sharedUndoApply()) {
+      toast('Nothing to undo');
+      return;
+    }
+    toast('Undo');
+    return;
+  }
+  if (state.historyIndex <= 0) return;
+  if (!restoreHistoryIndex(state.historyIndex - 1)) return;
   toast('Undo');
 }
 
 function redo() {
+  if (sync.isPlanSessionActive()) {
+    if (!sharedRedoApply()) {
+      toast('Nothing to redo');
+      return;
+    }
+    toast('Redo');
+    return;
+  }
   if (state.historyIndex >= state.history.length - 1) return;
-  state.historyIndex++;
-  state.layout = cloneLayout(state.history[state.historyIndex]);
-  state.selection = [];
-  render();
-  sync.onLocalEdit();
-  if (!sync.isPlanSessionActive()) saveLocalDraft();
+  if (!restoreHistoryIndex(state.historyIndex + 1)) return;
   toast('Redo');
 }
 
 function updateUndoButtons() {
-  $('#btn-undo').disabled = state.historyIndex <= 0;
-  $('#btn-redo').disabled = state.historyIndex >= state.history.length - 1;
+  const btnUndo = $('#btn-undo');
+  const btnRedo = $('#btn-redo');
+  if (sync.isPlanSessionActive()) {
+    const canUndo = !!findApplicableCommand(state.sharedUndo, state.layout, 'undo');
+    const canRedo = !!findApplicableCommand(state.sharedRedo, state.layout, 'redo');
+    if (btnUndo) {
+      btnUndo.disabled = !canUndo;
+      btnUndo.title = canUndo ? 'Undo your last change' : 'Undo unavailable';
+    }
+    if (btnRedo) {
+      btnRedo.disabled = !canRedo;
+      btnRedo.title = canRedo ? 'Redo' : 'Redo unavailable';
+    }
+    return;
+  }
+  if (btnUndo) {
+    btnUndo.disabled = state.historyIndex <= 0;
+    btnUndo.title = 'Undo';
+  }
+  if (btnRedo) {
+    btnRedo.disabled = state.historyIndex >= state.history.length - 1;
+    btnRedo.title = 'Redo';
+  }
 }
 
 function getWall(id) {
@@ -919,6 +1045,8 @@ function syncDeps() {
     validateLayout,
     toast,
     updateUndoButtons,
+    initSharedHistory,
+    syncSharedBaseline,
   };
 }
 
