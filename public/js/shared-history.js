@@ -6,7 +6,7 @@
 
 import { cloneLayout } from './default-layout.js';
 
-const ROOT_KEYS = ['name', 'bounds', 'meta', 'unit', 'version'];
+const ROOT_KEYS = ['name', 'bounds', 'meta', 'unit', 'version', 'lightingRegion'];
 
 /** @typedef {{ kind: string, id: string, before: object | null, after: object | null }} EntityChange */
 
@@ -38,6 +38,7 @@ export function buildLayoutCommand(prev, next) {
     ['wall', 'walls'],
     ['label', 'roomLabels'],
     ['opening', 'openings'],
+    ['light', 'lights'],
   ];
 
   for (const [kind, key] of collections) {
@@ -106,6 +107,7 @@ function findInLayout(layout, kind, id) {
   if (kind === 'wall') return layout.walls?.find((e) => e.id === id);
   if (kind === 'label') return (layout.roomLabels || []).find((e) => e.id === id);
   if (kind === 'opening') return layout.openings?.find((e) => e.id === id);
+  if (kind === 'light') return layout.lights?.find((e) => e.id === id);
   if (kind === 'background') return layout.backgroundImage ?? null;
   if (kind === 'root') {
     return pickRoot(layout);
@@ -118,6 +120,7 @@ function arrayKeyForKind(kind) {
   if (kind === 'wall') return 'walls';
   if (kind === 'label') return 'roomLabels';
   if (kind === 'opening') return 'openings';
+  if (kind === 'light') return 'lights';
   return null;
 }
 

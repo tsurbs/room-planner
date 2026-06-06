@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "party:dev": "partykit dev",
-    "party:deploy": "partykit deploy"
+    "party:deploy": "partykit deploy",
+    "lighting:check": "node scripts/lighting-occlusion-check.mjs"
   },
   "dependencies": {
     "@vercel/kv": "^3.0.0",

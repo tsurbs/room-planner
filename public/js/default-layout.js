@@ -11,6 +11,7 @@ export const LAYOUT_VERSION = 1;
 /** @typedef {{ src: string, x: number, y: number, width: number, height: number, opacity?: number, locked?: boolean }} BackgroundImage */
 /** @typedef {{ id: string, name: string, x: number, y: number, w: number, h: number }} RoomLabel */
 /** @typedef {{ id: string, wallId: string, t: number, width: number, kind: 'door'|'window'|'sliding' }} Opening */
+/** @typedef {{ id: string, type: string, x: number, y: number, sizeFt?: number, radiusFt?: number, kelvin?: number, intensity?: number }} Light */
 
 export function createEmptyLayout() {
   return {
@@ -22,6 +23,7 @@ export function createEmptyLayout() {
     openings: [],
     roomLabels: [],
     items: [],
+    lights: [],
     meta: {
       created: new Date().toISOString(),
       source: 'blank',
@@ -170,6 +172,14 @@ export function createDefaultLayout() {
 
   const items = [];
 
+  const lights = [
+    { id: 'light-liv', type: 'chandelier', x: 18.5, y: 5.5, kelvin: 3000, radiusFt: 12, intensity: 0.7 },
+    { id: 'light-din', type: 'pendant', x: 18, y: 16.5, kelvin: 2700, radiusFt: 8, intensity: 0.65 },
+    { id: 'light-kit', type: 'recessed-l', x: 17, y: 28, kelvin: 4000, radiusFt: 9, intensity: 0.8 },
+    { id: 'light-bed2', type: 'recessed-s', x: 6, y: 5, kelvin: 2700, radiusFt: 6, intensity: 0.6 },
+    { id: 'light-bed1', type: 'recessed-s', x: 28, y: 19, kelvin: 2700, radiusFt: 6, intensity: 0.6 },
+  ];
+
   return {
     version: LAYOUT_VERSION,
     unit: 'ft',
@@ -179,6 +189,7 @@ export function createDefaultLayout() {
     openings,
     roomLabels,
     items,
+    lights,
     meta: {
       created: new Date().toISOString(),
       source: 'default-floorplan',
@@ -191,6 +202,28 @@ export function validateLayout(data) {
   if (data.version !== LAYOUT_VERSION) return false;
   if (!Array.isArray(data.walls) || !Array.isArray(data.items)) return false;
   return true;
+}
+
+/** Ensure optional collections exist (backward-compatible import). */
+export function normalizeLayout(layout) {
+  if (!layout.openings) layout.openings = [];
+  if (!layout.roomLabels) layout.roomLabels = [];
+  if (!layout.lights) layout.lights = [];
+  ensureDrawOrder(layout);
+  return layout;
+}
+
+/** Assign draw-order `z` (higher = on top). Lights default above furniture. */
+export function ensureDrawOrder(layout) {
+  let z = 0;
+  for (const item of layout.items || []) {
+    if (typeof item.z !== 'number' || !Number.isFinite(item.z)) item.z = z++;
+  }
+  const maxItemZ = (layout.items || []).reduce((m, it) => Math.max(m, it.z ?? 0), -1);
+  const lightBase = Math.max(maxItemZ + 1, 1000);
+  (layout.lights || []).forEach((light, i) => {
+    if (typeof light.z !== 'number' || !Number.isFinite(light.z)) light.z = lightBase + i;
+  });
 }
 
 export function cloneLayout(layout) {

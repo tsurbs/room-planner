@@ -23,6 +23,7 @@ function emptyLayout(nowIso: string) {
     openings: [] as unknown[],
     roomLabels: [] as unknown[],
     items: [] as unknown[],
+    lights: [] as unknown[],
     meta: { created: nowIso, source: 'blank' },
   };
 }

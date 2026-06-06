@@ -4,7 +4,34 @@ import {
   createEmptyLayout,
   validateLayout,
   cloneLayout,
+  normalizeLayout,
+  ensureDrawOrder,
 } from './default-layout.js';
+import {
+  LIGHT_TYPES,
+  KELVIN_MIN,
+  KELVIN_MAX,
+  kelvinToCss,
+  kelvinLabel,
+  getLightPreset,
+  normalizeLight,
+  createLight,
+  lightMatchesQuery,
+  computeDefaultLightingRegion,
+  ensureLightingRegion,
+  expandLightingRegionForLights,
+  DEFAULT_LIGHT_QUALITY,
+  LIGHT_QUALITY,
+} from './lighting.js';
+import {
+  initLightingCanvas,
+  setLightingViewSync,
+  invalidateLighting,
+  syncLightingCanvas,
+  setLightingDraftMode,
+  setLightingQuality,
+  getLightingQuality,
+} from './lighting-canvas.js';
 import * as sync from './sync.js';
 import {
   buildLayoutCommand,
@@ -18,6 +45,7 @@ const STORAGE_SLOTS_KEY = 'room-planner-saves';
 const PANELS_STORAGE_KEY = 'room-planner-panels';
 const PX_PER_FT = 14;
 const BG_TRACE_ID = 'trace';
+const LIGHTING_REGION_ID = 'lighting-region';
 const BG_DEFAULT_OPACITY = 0.5;
 const BG_MAX_PX = 4096;
 const MOBILE_MQ = '(max-width: 768px)';
@@ -26,7 +54,7 @@ const DRAG_MOVE_THRESHOLD = 4;
 const state = {
   layout: createDefaultLayout(),
   mode: 'furnish', // 'furnish' | 'walls'
-  selection: [], // { kind: 'item'|'wall'|'label', id }[]
+  selection: [], // { kind: 'item'|'wall'|'label'|'light', id }[]
   drag: null,
   dragPending: null,
   pinch: null,
@@ -45,6 +73,8 @@ const state = {
   panels: { left: false, right: false },
   placingLabel: false,
   placingCatalogType: null,
+  placingLightType: null,
+  showLighting: true,
   wallDrawTool: false,
   lastLabelTap: { id: null, t: 0 },
 };
@@ -147,6 +177,8 @@ function renderItemSelectionOverlay(svg) {
 
 const $ = (sel) => document.querySelector(sel);
 const canvas = () => $('#floor-canvas');
+const canvasItems = () => $('#floor-canvas-items');
+const canvasBase = () => $('#floor-canvas-base');
 const svgNS = 'http://www.w3.org/2000/svg';
 
 function uid(prefix = 'id') {
@@ -292,6 +324,21 @@ const LAYOUT_DRAG_SYNC = new Set([
   'wall-draw',
 ]);
 
+const LIGHTING_DRAG_TYPES = new Set([
+  'light-move',
+  'wall-move',
+  'wall-endpoint',
+  'wall-draw',
+  'lighting-region-move',
+  'lighting-region-resize',
+]);
+
+/** True when a drag should trigger lightmap recompute (walls/lights/region only). */
+function dragAffectsLighting(drag) {
+  if (!drag) return false;
+  return LIGHTING_DRAG_TYPES.has(drag.type);
+}
+
 const HISTORY_MAX = 50;
 
 function initSharedHistory(layout) {
@@ -334,6 +381,7 @@ function pushHistory() {
   }
   updateUndoButtons();
   saveLocalDraft();
+  if (state.showLighting) invalidateLighting(false);
 }
 
 function restoreHistoryIndex(index) {
@@ -350,6 +398,10 @@ function restoreHistoryIndex(index) {
 
 function renderDuringLayoutDrag() {
   render();
+  if (state.showLighting && state.drag && dragAffectsLighting(state.drag)) {
+    setLightingDraftMode(true);
+    invalidateLighting(false);
+  }
   if (state.drag && LAYOUT_DRAG_SYNC.has(state.drag.type)) {
     sync.onLayoutPreview();
   }
@@ -447,12 +499,94 @@ function getItem(id) {
   return state.layout.items.find((i) => i.id === id);
 }
 
+function getLight(id) {
+  return (state.layout.lights || []).find((l) => l.id === id);
+}
+
+function ensureLayoutCollections() {
+  normalizeLayout(state.layout);
+  (state.layout.lights || []).forEach(normalizeLight);
+  ensureDrawOrder(state.layout);
+  if (state.showLighting && (state.layout.lights || []).length) {
+    ensureLightingRegion(state.layout);
+  }
+}
+
+function layoutMaxZ() {
+  let max = -1;
+  for (const item of state.layout.items || []) {
+    if (typeof item.z === 'number') max = Math.max(max, item.z);
+  }
+  for (const light of state.layout.lights || []) {
+    if (typeof light.z === 'number') max = Math.max(max, light.z);
+  }
+  return Math.max(max, 0);
+}
+
+function getSortedDrawables() {
+  /** @type {{ kind: 'item'|'light', id: string, z: number }[]} */
+  const list = [];
+  for (const item of state.layout.items || []) {
+    list.push({ kind: 'item', id: item.id, z: item.z ?? 0 });
+  }
+  for (const light of state.layout.lights || []) {
+    list.push({ kind: 'light', id: light.id, z: light.z ?? 0 });
+  }
+  list.sort((a, b) => a.z - b.z || a.kind.localeCompare(b.kind));
+  return list;
+}
+
+function bringDrawableForward(kind, id) {
+  const list = getSortedDrawables();
+  const idx = list.findIndex((d) => d.kind === kind && d.id === id);
+  if (idx < 0 || idx >= list.length - 1) return;
+  const cur = kind === 'item' ? getItem(id) : getLight(id);
+  const next = list[idx + 1];
+  const above = next.kind === 'item' ? getItem(next.id) : getLight(next.id);
+  if (!cur || !above) return;
+  const tmp = cur.z;
+  cur.z = above.z;
+  above.z = tmp;
+  pushHistory();
+  render();
+}
+
+function sendDrawableBackward(kind, id) {
+  const list = getSortedDrawables();
+  const idx = list.findIndex((d) => d.kind === kind && d.id === id);
+  if (idx <= 0) return;
+  const cur = kind === 'item' ? getItem(id) : getLight(id);
+  const prev = list[idx - 1];
+  const below = prev.kind === 'item' ? getItem(prev.id) : getLight(prev.id);
+  if (!cur || !below) return;
+  const tmp = cur.z;
+  cur.z = below.z;
+  below.z = tmp;
+  pushHistory();
+  render();
+}
+
 function getRoomLabel(id) {
   return (state.layout.roomLabels || []).find((r) => r.id === id);
 }
 
 function getBackgroundImage() {
   return state.layout.backgroundImage || null;
+}
+
+function getLightingRegion() {
+  ensureLightingRegion(state.layout);
+  if ((state.layout.lights || []).length) {
+    expandLightingRegionForLights(state.layout);
+  }
+  return state.layout.lightingRegion;
+}
+
+function fitLightingRegionToPlan() {
+  state.layout.lightingRegion = computeDefaultLightingRegion(state.layout);
+  pushHistory();
+  render();
+  toast('Lighting region fitted to floor plan');
 }
 
 function updateTraceImageButton() {
@@ -639,12 +773,20 @@ function cancelPlacingCatalog() {
   return true;
 }
 
+function cancelPlacingLight() {
+  if (!state.placingLightType) return false;
+  state.placingLightType = null;
+  $('.canvas-wrap')?.classList.remove('placing-light');
+  return true;
+}
+
 function cancelMobileModes() {
   const a = cancelPlacingLabel();
   const b = cancelPlacingCatalog();
+  const c = cancelPlacingLight();
   const hadWallTool = state.wallDrawTool;
   state.wallDrawTool = false;
-  return a || b || hadWallTool;
+  return a || b || c || hadWallTool;
 }
 
 function toggleSelection(kind, id) {
@@ -675,12 +817,27 @@ function addItem(type, x, y) {
     w: cat.w,
     h: cat.h,
     rotation: 0,
+    z: layoutMaxZ() + 1,
   };
   state.layout.items.push(item);
   pushHistory();
   selectOne('item', item.id);
   render();
   toast(`Added ${cat.label}`);
+}
+
+function addLight(type, x, y) {
+  const preset = getLightPreset(type);
+  if (!preset) return;
+  const light = createLight(type, snapFt(x), snapFt(y), uid('light'));
+  light.z = layoutMaxZ() + 1;
+  if (!state.layout.lights) state.layout.lights = [];
+  state.layout.lights.push(light);
+  expandLightingRegionForLights(state.layout);
+  pushHistory();
+  selectOne('light', light.id);
+  render();
+  toast(`Added ${preset.label}`);
 }
 
 function deleteSelected() {
@@ -698,8 +855,14 @@ function deleteSelected() {
   const labelIds = new Set(
     state.selection.filter((s) => s.kind === 'label').map((s) => s.id)
   );
+  const lightIds = new Set(
+    state.selection.filter((s) => s.kind === 'light').map((s) => s.id)
+  );
   state.layout.items = state.layout.items.filter((i) => !itemIds.has(i.id));
   state.layout.walls = state.layout.walls.filter((w) => !wallIds.has(w.id));
+  if (lightIds.size) {
+    state.layout.lights = (state.layout.lights || []).filter((l) => !lightIds.has(l.id));
+  }
   if (wallIds.size) {
     state.layout.openings = (state.layout.openings || []).filter(
       (o) => !wallIds.has(o.wallId)
@@ -750,6 +913,12 @@ function nudgeSelected(dx, dy) {
       lbl.x = snapFt(lbl.x + dx);
       lbl.y = snapFt(lbl.y + dy);
       moved = true;
+    } else if (s.kind === 'light') {
+      const light = getLight(s.id);
+      if (!light) return;
+      light.x = snapFt(light.x + dx);
+      light.y = snapFt(light.y + dy);
+      moved = true;
     }
   });
   if (moved) {
@@ -760,7 +929,23 @@ function nudgeSelected(dx, dy) {
 
 function duplicateSelected() {
   const newIds = [];
+  const newLightIds = [];
   state.selection.forEach((s) => {
+    if (s.kind === 'light') {
+      const src = getLight(s.id);
+      if (!src) return;
+      const copy = {
+        ...src,
+        id: uid('light'),
+        x: snapFt(src.x + 0.5),
+        y: snapFt(src.y + 0.5),
+        z: layoutMaxZ() + 1,
+      };
+      if (!state.layout.lights) state.layout.lights = [];
+      state.layout.lights.push(copy);
+      newLightIds.push(copy.id);
+      return;
+    }
     if (s.kind !== 'item') return;
     const src = getItem(s.id);
     if (!src) return;
@@ -769,33 +954,28 @@ function duplicateSelected() {
       id: uid('item'),
       x: snapFt(src.x + 0.5),
       y: snapFt(src.y + 0.5),
+      z: layoutMaxZ() + 1,
     };
     state.layout.items.push(copy);
     newIds.push(copy.id);
   });
-  if (!newIds.length) return;
+  if (!newIds.length && !newLightIds.length) return;
   pushHistory();
-  state.selection = newIds.map((id) => ({ kind: 'item', id }));
+  if (newLightIds.length && !newIds.length) {
+    state.selection = newLightIds.map((id) => ({ kind: 'light', id }));
+  } else if (newIds.length) {
+    state.selection = newIds.map((id) => ({ kind: 'item', id }));
+  }
   render();
   toast('Duplicated');
 }
 
 function bringItemForward(id) {
-  const items = state.layout.items;
-  const i = items.findIndex((it) => it.id === id);
-  if (i < 0 || i >= items.length - 1) return;
-  [items[i], items[i + 1]] = [items[i + 1], items[i]];
-  pushHistory();
-  render();
+  bringDrawableForward('item', id);
 }
 
 function sendItemBackward(id) {
-  const items = state.layout.items;
-  const i = items.findIndex((it) => it.id === id);
-  if (i <= 0) return;
-  [items[i], items[i - 1]] = [items[i - 1], items[i]];
-  pushHistory();
-  render();
+  sendDrawableBackward('item', id);
 }
 
 function updatePanCursor() {
@@ -1141,13 +1321,230 @@ function renderBackgroundLayer(svg) {
   svg.appendChild(gBg);
 }
 
-function render() {
-  const svg = canvas();
-  if (!svg) return;
-  svg.innerHTML = '';
-  svg.setAttribute('class', `mode-${state.mode}`);
+function buildItemNode(item) {
+  const cat = CATALOG[item.type] || { label: item.type };
+  const sel = isSelected('item', item.id);
+  const rot = item.rotation || 0;
+  const p = worldToScreen(item.x, item.y);
+  const pw = ftToPx(item.w);
+  const ph = ftToPx(item.h);
 
-  renderBackgroundLayer(svg);
+  const g = el('g', {
+    class: `item ${sel ? 'selected' : ''}`,
+    'data-item-id': item.id,
+    transform: `translate(${p.x},${p.y}) rotate(${rot},${pw / 2},${ph / 2})`,
+  });
+
+  g.appendChild(
+    el('rect', {
+      x: 0,
+      y: 0,
+      width: pw,
+      height: ph,
+      rx: cat.round ? pw / 2 : 2,
+      class: `item-rect ${cat.fixture ? 'fixture' : ''} ${sel ? 'selected' : ''}`,
+      opacity: cat.opacity ?? 1,
+    })
+  );
+
+  const label = el('text', {
+    x: pw / 2,
+    y: ph / 2 + 3,
+    class: 'item-label',
+    'text-anchor': 'middle',
+  });
+  label.textContent = cat.label.split(' ')[0];
+  g.appendChild(label);
+  return g;
+}
+
+function buildLightFixtureNode(light) {
+  const preset = getLightPreset(light.type);
+  const p = worldToScreen(light.x, light.y);
+  const sizePx = ftToPx(light.sizeFt);
+  const sel = isSelected('light', light.id);
+  const hitR = Math.max(sizePx / 2, isMobileTouchUI() ? 14 : 10);
+
+  const fixture = el('g', {
+    class: `light-fixture ${sel ? 'selected' : ''}`,
+    'data-light-id': light.id,
+  });
+
+  if (state.showLighting) {
+      fixture.appendChild(
+        el('circle', {
+          cx: p.x,
+          cy: p.y,
+          r: sizePx / 2,
+          class: 'light-fixture-ring',
+          stroke: kelvinToCss(light.kelvin),
+        })
+      );
+      fixture.appendChild(
+        el('circle', {
+          cx: p.x,
+          cy: p.y,
+          r: Math.max(2, sizePx * 0.22),
+          fill: kelvinToCss(light.kelvin),
+          class: 'light-fixture-core',
+          'pointer-events': 'none',
+        })
+      );
+    } else {
+      fixture.appendChild(
+        el('circle', {
+          cx: p.x,
+          cy: p.y,
+          r: 4,
+          class: 'light-fixture-marker',
+          'pointer-events': 'none',
+        })
+      );
+    }
+    fixture.appendChild(
+      el('circle', {
+        cx: p.x,
+        cy: p.y,
+        r: hitR,
+        class: 'light-fixture-hit',
+        'data-light-id': light.id,
+        fill: 'transparent',
+      })
+    );
+
+    if (sel) {
+      fixture.appendChild(
+        el('circle', {
+          cx: p.x,
+          cy: p.y,
+          r: sizePx / 2 + 3,
+          fill: 'none',
+          stroke: 'var(--selection)',
+          'stroke-width': 1.5,
+          'pointer-events': 'none',
+        })
+      );
+      const fs = isMobileTouchUI() ? 9 : 8;
+      const label = el('text', {
+        x: p.x,
+        y: p.y - sizePx / 2 - 6,
+        class: 'light-fixture-label',
+        'text-anchor': 'middle',
+        'font-size': fs,
+      });
+      label.textContent = `${light.kelvin}K`;
+      fixture.appendChild(label);
+    } else if (state.showLighting && sizePx >= 14) {
+      const fs = 7;
+      const label = el('text', {
+        x: p.x,
+        y: p.y + fs * 0.35,
+        class: 'light-fixture-label',
+        'text-anchor': 'middle',
+        'font-size': fs,
+      });
+      label.textContent = preset.label.split(' ')[0];
+      fixture.appendChild(label);
+    }
+
+  return fixture;
+}
+
+function refreshLightingPreview() {
+  if (!state.showLighting || !(state.layout.lights || []).length) {
+    invalidateLighting(true);
+    return;
+  }
+  if (expandLightingRegionForLights(state.layout)) {
+    invalidateLighting(false);
+  }
+  syncLightingCanvas();
+}
+
+function renderLightingRegionOverlay(svg) {
+  if (!state.showLighting || state.mode !== 'furnish') return;
+  const lights = state.layout.lights || [];
+  if (!lights.length) return;
+
+  const region = getLightingRegion();
+  const p = worldToScreen(region.x, region.y);
+  const pw = ftToPx(region.width);
+  const ph = ftToPx(region.height);
+  const sel = isSelected('lighting-region', LIGHTING_REGION_ID);
+  const g = el('g', {
+    class: `lighting-region-layer ${sel ? 'selected' : ''}`,
+    'data-lighting-region-id': LIGHTING_REGION_ID,
+  });
+
+  g.appendChild(
+    el('rect', {
+      x: p.x,
+      y: p.y,
+      width: pw,
+      height: ph,
+      fill: 'none',
+      stroke: sel ? 'var(--selection)' : 'rgba(180, 190, 210, 0.55)',
+      'stroke-width': sel ? 1.5 : 1,
+      'stroke-dasharray': sel ? 'none' : '6 4',
+      class: 'lighting-region-outline',
+      'pointer-events': 'none',
+    })
+  );
+
+  const edge = isMobileTouchUI() ? 18 : 12;
+  g.appendChild(
+    el('rect', {
+      x: p.x,
+      y: p.y,
+      width: pw,
+      height: ph,
+      fill: 'none',
+      stroke: 'transparent',
+      'stroke-width': edge,
+      class: 'lighting-region-hit',
+      'data-lighting-region': '1',
+    })
+  );
+
+  if (sel) {
+    const { hs, hSize } = handleMetrics();
+    [
+      { x: p.x, y: p.y, corner: 'nw' },
+      { x: p.x + pw, y: p.y, corner: 'ne' },
+      { x: p.x, y: p.y + ph, corner: 'sw' },
+      { x: p.x + pw, y: p.y + ph, corner: 'se' },
+    ].forEach((h) => {
+      g.appendChild(
+        el('rect', {
+          x: h.x - hs,
+          y: h.y - hs,
+          width: hSize,
+          height: hSize,
+          class: 'resize-handle lighting-region-handle',
+          'data-lighting-region-resize': h.corner,
+        })
+      );
+    });
+  }
+
+  svg.appendChild(g);
+}
+
+function render() {
+  const svgBase = canvasBase();
+  const svgItems = canvasItems();
+  const svg = canvas();
+  if (!svgBase || !svgItems || !svg) return;
+  ensureLayoutCollections();
+  svgBase.innerHTML = '';
+  svgItems.innerHTML = '';
+  svg.innerHTML = '';
+  const modeClass = `mode-${state.mode}`;
+  svgBase.setAttribute('class', modeClass);
+  svgItems.setAttribute('class', modeClass);
+  svg.setAttribute('class', modeClass);
+
+  renderBackgroundLayer(svgBase);
 
   const { width, height } = state.layout.bounds;
   const gGrid = el('g', { class: 'grid-layer' });
@@ -1179,7 +1576,7 @@ function render() {
       })
     );
   }
-  svg.appendChild(gGrid);
+  svgBase.appendChild(gGrid);
 
   const gLabels = el('g', { class: 'labels-layer' });
   (state.layout.roomLabels || []).forEach((r) => {
@@ -1278,7 +1675,7 @@ function render() {
       });
     }
   });
-  svg.appendChild(gWalls);
+  svgBase.appendChild(gWalls);
 
   const gOpen = el('g', { class: 'openings-layer' });
   (state.layout.openings || []).forEach((o) => {
@@ -1308,54 +1705,40 @@ function render() {
       })
     );
   });
-  svg.appendChild(gOpen);
+  svgBase.appendChild(gOpen);
 
-  const gItems = el('g', { class: 'items-layer' });
-  state.layout.items.forEach((item) => {
-    const cat = CATALOG[item.type] || { label: item.type };
-    const sel = isSelected('item', item.id);
-    const rot = item.rotation || 0;
-    const p = worldToScreen(item.x, item.y);
-    const pw = ftToPx(item.w);
-    const ph = ftToPx(item.h);
+  const gItems = el('g', { class: 'floor-objects-layer' });
+  for (const drawable of getSortedDrawables()) {
+    if (drawable.kind !== 'item') continue;
+    const item = getItem(drawable.id);
+    if (item) gItems.appendChild(buildItemNode(item));
+  }
+  svgItems.appendChild(gItems);
 
-    const g = el('g', {
-      class: `item ${sel ? 'selected' : ''}`,
-      'data-item-id': item.id,
-      transform: `translate(${p.x},${p.y}) rotate(${rot},${pw / 2},${ph / 2})`,
-    });
-
-    const rect = el('rect', {
-      x: 0,
-      y: 0,
-      width: pw,
-      height: ph,
-      rx: cat.round ? pw / 2 : 2,
-      class: `item-rect ${cat.fixture ? 'fixture' : ''} ${sel ? 'selected' : ''}`,
-      opacity: cat.opacity ?? 1,
-    });
-    g.appendChild(rect);
-
-    const label = el('text', {
-      x: pw / 2,
-      y: ph / 2 + 3,
-      class: 'item-label',
-      'text-anchor': 'middle',
-    });
-    label.textContent = cat.label.split(' ')[0];
-    g.appendChild(label);
-
-    gItems.appendChild(g);
-  });
-  svg.appendChild(gItems);
+  const gFixtures = el('g', { class: 'floor-fixtures-layer' });
+  for (const drawable of getSortedDrawables()) {
+    if (drawable.kind !== 'light') continue;
+    const light = getLight(drawable.id);
+    if (light) gFixtures.appendChild(buildLightFixtureNode(light));
+  }
+  svg.appendChild(gFixtures);
   svg.appendChild(gLabels);
+  $('.canvas-wrap')?.classList.toggle(
+    'lighting-preview-on',
+    state.showLighting && (state.layout.lights || []).length > 0
+  );
+
+  refreshLightingPreview();
 
   sync.renderPeers(svg, worldToScreen);
-  renderItemSelectionOverlay(svg);
+  renderItemSelectionOverlay(svgItems);
+  renderLightingRegionOverlay(svg);
 
   const bgNote = getBackgroundImage()?.src ? ' · trace image' : '';
+  const lightCount = (state.layout.lights || []).length;
+  const lightNote = lightCount ? ` · ${lightCount} light${lightCount === 1 ? '' : 's'}` : '';
   setStatus(
-    `${state.mode === 'walls' ? 'Edit walls' : 'Furnish'} · ${state.layout.items.length} items${bgNote} · zoom ${(state.zoom * 100).toFixed(0)}%`
+    `${state.mode === 'walls' ? 'Edit walls' : 'Furnish'} · ${state.layout.items.length} items${lightNote}${bgNote} · zoom ${(state.zoom * 100).toFixed(0)}%`
   );
   renderProperties();
   updateTraceImageButton();
@@ -1377,15 +1760,20 @@ function renderProperties() {
     const bgHint = getBackgroundImage()?.src
       ? ' Click the trace image (empty areas) or use <strong>Trace image</strong> in the toolbar to select it.'
       : ' Use <strong>Trace image</strong> to upload or paste a floorplan photo behind the grid.';
-    panel.innerHTML = `<p class="empty-state">Select furniture, a wall, or a room label. Double-click a label to edit its text.${bgHint}</p>`;
+    const lightHint = state.showLighting && (state.layout.lights || []).length
+      ? ' Click the dashed lighting frame edge to resize the preview region.'
+      : '';
+    panel.innerHTML = `<p class="empty-state">Select furniture, a light, a wall, or a room label. Double-click a label to edit its text.${lightHint}${bgHint}</p>`;
     return;
   }
   if (state.selection.length > 1) {
     const n = state.selection.filter((s) => s.kind === 'item').length;
     const w = state.selection.filter((s) => s.kind === 'wall').length;
     const l = state.selection.filter((s) => s.kind === 'label').length;
+    const lt = state.selection.filter((s) => s.kind === 'light').length;
     const parts = [];
     if (n) parts.push(`${n} item${n > 1 ? 's' : ''}`);
+    if (lt) parts.push(`${lt} light${lt > 1 ? 's' : ''}`);
     if (w) parts.push(`${w} wall${w > 1 ? 's' : ''}`);
     if (l) parts.push(`${l} label${l > 1 ? 's' : ''}`);
     panel.innerHTML = `
@@ -1452,6 +1840,49 @@ function renderProperties() {
     $('#bg-remove')?.addEventListener('click', removeBackgroundImage);
     return;
   }
+  if (sel.kind === 'lighting-region') {
+    const region = getLightingRegion();
+    const q = getLightingQuality();
+    const qualityOptions = Object.keys(LIGHT_QUALITY)
+      .map(
+        (key) =>
+          `<option value="${key}" ${q === key ? 'selected' : ''}>${key.charAt(0).toUpperCase() + key.slice(1)}</option>`
+      )
+      .join('');
+    panel.innerHTML = `
+      <p class="empty-state" style="padding-top:0;margin-bottom:8px;font-size:11px">Lighting region</p>
+      <p class="panel-hint" style="margin:0 0 10px;font-size:11px">Floor lightmap is computed inside this frame. Drag edges or corners to resize.</p>
+      <div class="prop-row">
+        <label>X (ft)<input type="number" id="lr-x" value="${region.x}" step="0.25"></label>
+        <label>Y (ft)<input type="number" id="lr-y" value="${region.y}" step="0.25"></label>
+      </div>
+      <div class="prop-row">
+        <label>Width (ft)<input type="number" id="lr-w" value="${region.width}" step="0.5" min="4"></label>
+        <label>Height (ft)<input type="number" id="lr-h" value="${region.height}" step="0.5" min="4"></label>
+      </div>
+      <label>Quality<select id="lr-quality">${qualityOptions}</select></label>
+      <button type="button" class="btn" id="lr-fit">Fit to floor plan</button>
+    `;
+    const applyRegion = () => {
+      region.width = Math.max(4, region.width);
+      region.height = Math.max(4, region.height);
+      pushHistory();
+      render();
+    };
+    ['lr-x', 'lr-y', 'lr-w', 'lr-h'].forEach((id) => {
+      $(`#${id}`)?.addEventListener('change', (e) => {
+        const key = id === 'lr-x' ? 'x' : id === 'lr-y' ? 'y' : id === 'lr-w' ? 'width' : 'height';
+        region[key] = parseFloat(e.target.value) || region[key];
+        applyRegion();
+      });
+    });
+    $('#lr-fit')?.addEventListener('click', fitLightingRegionToPlan);
+    $('#lr-quality')?.addEventListener('change', (e) => {
+      setLightingQuality(e.target.value);
+      toast(`Lightmap quality: ${e.target.value}`);
+    });
+    return;
+  }
   if (sel.kind === 'label') {
     const lbl = getRoomLabel(sel.id);
     if (!lbl) {
@@ -1491,6 +1922,98 @@ function renderProperties() {
     $('#prop-delete')?.addEventListener('click', deleteSelected);
     return;
   }
+  if (sel.kind === 'light') {
+    const light = getLight(sel.id);
+    if (!light) {
+      clearSelection();
+      return;
+    }
+    const preset = getLightPreset(light.type);
+    const typeOptions = Object.entries(LIGHT_TYPES)
+      .map(
+        ([type, p]) =>
+          `<option value="${type}" ${light.type === type ? 'selected' : ''}>${p.label}</option>`
+      )
+      .join('');
+    panel.innerHTML = `
+      <p class="empty-state" style="padding-top:0;margin-bottom:8px;font-size:11px">Light fixture</p>
+      <label>Type
+        <select id="light-type">${typeOptions}</select>
+      </label>
+      <div class="prop-row">
+        <label>X (ft)<input type="number" id="light-x" value="${light.x}" step="0.25"></label>
+        <label>Y (ft)<input type="number" id="light-y" value="${light.y}" step="0.25"></label>
+      </div>
+      <div class="prop-row">
+        <label>Fixture (ft)<input type="number" id="light-size" value="${light.sizeFt}" step="0.25" min="0.4"></label>
+        <label>Radius (ft)<input type="number" id="light-radius" value="${light.radiusFt}" step="0.5" min="2"></label>
+      </div>
+      <label>Temperature — <span id="light-kelvin-label">${light.kelvin}K (${kelvinLabel(light.kelvin)})</span>
+        <input type="range" id="light-kelvin" min="${KELVIN_MIN}" max="${KELVIN_MAX}" step="100" value="${light.kelvin}">
+      </label>
+      <div class="light-temp-swatch" id="light-temp-swatch" style="background:${kelvinToCss(light.kelvin)}"></div>
+      <label>Intensity<input type="range" id="light-intensity" min="0.1" max="1" step="0.05" value="${light.intensity}"></label>
+      <label>Layer (z)<input type="number" id="light-z" value="${light.z ?? 0}" step="1"></label>
+      <div class="prop-row">
+        <button type="button" class="btn" id="prop-forward" title="Bring forward">↑ layer</button>
+        <button type="button" class="btn" id="prop-back" title="Send backward">↓ layer</button>
+      </div>
+      <button type="button" class="btn" id="prop-dup">Duplicate</button>
+      <button type="button" class="btn" id="prop-delete">Delete</button>
+    `;
+    const applyLight = (rerender = true) => {
+      normalizeLight(light);
+      pushHistory();
+      if (rerender) render();
+    };
+    $('#light-type')?.addEventListener('change', (e) => {
+      light.type = e.target.value;
+      const p = getLightPreset(light.type);
+      light.sizeFt = p.sizeFt;
+      light.radiusFt = p.radiusFt;
+      if (!light.kelvin || light.kelvin === preset.kelvin) light.kelvin = p.kelvin;
+      applyLight();
+    });
+    const updateKelvinUi = () => {
+      $('#light-kelvin-label').textContent = `${light.kelvin}K (${kelvinLabel(light.kelvin)})`;
+      const swatch = $('#light-temp-swatch');
+      if (swatch) swatch.style.background = kelvinToCss(light.kelvin);
+    };
+    $('#light-kelvin')?.addEventListener('input', (e) => {
+      light.kelvin = parseInt(e.target.value, 10) || preset.kelvin;
+      updateKelvinUi();
+      render();
+    });
+    $('#light-kelvin')?.addEventListener('change', () => applyLight(false));
+    $('#light-intensity')?.addEventListener('input', (e) => {
+      light.intensity = parseFloat(e.target.value) || 0.75;
+      render();
+    });
+    $('#light-intensity')?.addEventListener('change', () => applyLight(false));
+    ['light-x', 'light-y', 'light-size', 'light-radius'].forEach((id) => {
+      $(`#${id}`)?.addEventListener('change', (e) => {
+        const key =
+          id === 'light-x'
+            ? 'x'
+            : id === 'light-y'
+              ? 'y'
+              : id === 'light-size'
+                ? 'sizeFt'
+                : 'radiusFt';
+        light[key] = parseFloat(e.target.value) || 0;
+        applyLight();
+      });
+    });
+    $('#light-z')?.addEventListener('change', (e) => {
+      light.z = parseInt(e.target.value, 10) || 0;
+      applyLight();
+    });
+    $('#prop-forward')?.addEventListener('click', () => bringDrawableForward('light', light.id));
+    $('#prop-back')?.addEventListener('click', () => sendDrawableBackward('light', light.id));
+    $('#prop-dup')?.addEventListener('click', duplicateSelected);
+    $('#prop-delete')?.addEventListener('click', deleteSelected);
+    return;
+  }
   if (sel.kind === 'item') {
     const item = getItem(sel.id);
     const cat = CATALOG[item.type];
@@ -1507,6 +2030,7 @@ function renderProperties() {
         <label>Width (ft)<input type="number" id="prop-w" value="${item.w}" step="0.25" min="0.5"></label>
         <label>Depth (ft)<input type="number" id="prop-h" value="${item.h}" step="0.25" min="0.5"></label>
       </div>
+      <label>Layer (z)<input type="number" id="prop-z" value="${item.z ?? 0}" step="1"></label>
       <button type="button" class="btn" id="prop-rotate">Rotate 90°</button>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
         <button type="button" class="btn" id="prop-forward" title="Bring forward">↑ layer</button>
@@ -1515,11 +2039,12 @@ function renderProperties() {
         <button type="button" class="btn" id="prop-delete">Delete</button>
       </div>
     `;
-    ['prop-x', 'prop-y', 'prop-w', 'prop-h', 'prop-rot'].forEach((id) => {
+    ['prop-x', 'prop-y', 'prop-w', 'prop-h', 'prop-rot', 'prop-z'].forEach((id) => {
       $(`#${id}`)?.addEventListener('change', (e) => {
         const key = id.replace('prop-', '');
-        const map = { x: 'x', y: 'y', w: 'w', h: 'h', rot: 'rotation' };
-        item[map[key]] = parseFloat(e.target.value) || 0;
+        const map = { x: 'x', y: 'y', w: 'w', h: 'h', rot: 'rotation', z: 'z' };
+        const raw = e.target.value;
+        item[map[key]] = key === 'z' ? parseInt(raw, 10) || 0 : parseFloat(raw) || 0;
         pushHistory();
         render();
       });
@@ -1565,6 +2090,7 @@ function renderProperties() {
 const IMMEDIATE_DRAG_TYPES = new Set([
   'resize',
   'bg-resize',
+  'lighting-region-resize',
   'rotate-drag',
   'wall-endpoint',
   'wall-draw',
@@ -1575,7 +2101,9 @@ const IMMEDIATE_DRAG_TYPES = new Set([
 const DRAG_DEFER_UNTIL_MOVE_TYPES = new Set([
   'item-move',
   'label-move',
+  'light-move',
   'bg-move',
+  'lighting-region-move',
   'wall-move',
 ]);
 
@@ -1607,6 +2135,9 @@ function assignDrag(drag, evt) {
   }
   svg.setPointerCapture(evt.pointerId);
   if (drag.type === 'pan') updatePanCursor();
+  if (immediate && state.showLighting && dragAffectsLighting(drag)) {
+    setLightingDraftMode(true);
+  }
 }
 
 function promotePendingDrag(evt) {
@@ -1618,6 +2149,9 @@ function promotePendingDrag(evt) {
   state.drag = drag;
   state.dragPending = null;
   if (drag.type === 'pan') updatePanCursor();
+  if (state.showLighting && dragAffectsLighting(drag)) {
+    setLightingDraftMode(true);
+  }
   return true;
 }
 
@@ -1647,6 +2181,20 @@ function revertPendingDrag() {
       lbl.y = p.orig.y;
       render();
     }
+  } else if (p.type === 'light-move' && p.orig) {
+    const light = getLight(p.id);
+    if (light) {
+      light.x = p.orig.x;
+      light.y = p.orig.y;
+      render();
+    }
+  } else if (p.type === 'lighting-region-move' && p.orig) {
+    const region = getLightingRegion();
+    if (region) {
+      region.x = p.orig.x;
+      region.y = p.orig.y;
+      render();
+    }
   }
   state.dragPending = null;
 }
@@ -1658,6 +2206,11 @@ function finalizePendingPointer(evt, pending) {
   if (pending.type === 'item-move') {
     if (hit?.kind === 'item') selectHit(hit, false);
     else selectOne('item', pending.id);
+    return;
+  }
+  if (pending.type === 'light-move') {
+    if (hit?.kind === 'light') selectHit(hit, false);
+    else selectOne('light', pending.id);
     return;
   }
   if (pending.type === 'label-move') {
@@ -1678,6 +2231,10 @@ function finalizePendingPointer(evt, pending) {
   }
   if (pending.type === 'bg-move') {
     if (hit?.kind === 'background') selectOne('background', BG_TRACE_ID);
+    return;
+  }
+  if (pending.type === 'lighting-region-move') {
+    if (hit?.kind === 'lighting-region') selectOne('lighting-region', LIGHTING_REGION_ID);
     return;
   }
   if (pending.type === 'wall-move') {
@@ -1708,6 +2265,13 @@ function handleMobileTap(evt, pending = null) {
     return;
   }
 
+  if (state.placingLightType && state.mode === 'furnish' && (!hit || hit.kind === 'item')) {
+    const w = screenToWorld(pt.x, pt.y);
+    addLight(state.placingLightType, w.x, w.y);
+    cancelPlacingLight();
+    return;
+  }
+
   if (state.placingLabel && state.mode === 'furnish' && !hit) {
     const w = screenToWorld(pt.x, pt.y);
     addRoomLabel(w.x, w.y);
@@ -1731,6 +2295,11 @@ function handleMobileTap(evt, pending = null) {
   state.lastLabelTap = { id: null, t: 0 };
 
   if (hit?.kind === 'item' && !isSelected('item', hit.id)) {
+    selectHit(hit, false);
+    return;
+  }
+
+  if (hit?.kind === 'light' && !isSelected('light', hit.id)) {
     selectHit(hit, false);
     return;
   }
@@ -1810,18 +2379,14 @@ function getSvgPoint(evt) {
   return pt.matrixTransform(ctm);
 }
 
-function hitTest(evt) {
-  const target = evt.target;
-  const bgResize = target.dataset?.bgResize || target.getAttribute?.('data-bg-resize');
-  if (bgResize) return { kind: 'background', id: BG_TRACE_ID, resize: bgResize };
-  if (target.dataset?.bg || target.getAttribute?.('data-bg')) {
-    return { kind: 'background', id: BG_TRACE_ID };
-  }
-  const labelId =
-    target.getAttribute?.('data-label-id') ||
-    target.closest?.('[data-label-id]')?.getAttribute('data-label-id');
-  if (labelId) return { kind: 'label', id: labelId };
-  const itemId = target.closest?.('[data-item-id]')?.getAttribute('data-item-id');
+/** Prefer furniture/walls/lights over trace image and lighting-region frame edges. */
+const HIT_TEST_PRIORITY = ['item', 'light', 'wall', 'label', 'lighting-region', 'background'];
+
+function hitTestFromElement(target) {
+  if (!target || typeof target.getAttribute !== 'function') return null;
+
+  const itemRoot = target.closest?.('[data-item-id]');
+  const itemId = itemRoot?.getAttribute('data-item-id');
   if (itemId) {
     const resizeEl = target.closest?.('[data-resize]');
     const rotateEl = target.closest?.('[data-rotate]');
@@ -1832,15 +2397,71 @@ function hitTest(evt) {
       rotate: rotateEl ? true : undefined,
     };
   }
-  const wallId = target.getAttribute?.('data-wall-id');
-  if (wallId) {
+
+  const lightId = target.closest?.('.light-fixture')?.getAttribute('data-light-id');
+  if (lightId) return { kind: 'light', id: lightId };
+
+  const wallNode = target.closest?.('[data-wall-id]');
+  if (wallNode) {
     return {
       kind: 'wall',
-      id: wallId,
-      endpoint: target.getAttribute('data-endpoint'),
+      id: wallNode.getAttribute('data-wall-id'),
+      endpoint:
+        target.getAttribute?.('data-endpoint') ||
+        wallNode.getAttribute?.('data-endpoint') ||
+        undefined,
     };
   }
+
+  const labelId =
+    target.getAttribute?.('data-label-id') ||
+    target.closest?.('[data-label-id]')?.getAttribute('data-label-id');
+  if (labelId) return { kind: 'label', id: labelId };
+
+  if (state.showLighting) {
+    const lrResize =
+      target.dataset?.lightingRegionResize ||
+      target.getAttribute?.('data-lighting-region-resize');
+    if (lrResize) {
+      return { kind: 'lighting-region', id: LIGHTING_REGION_ID, resize: lrResize };
+    }
+    const onRegionEdge =
+      target.classList?.contains('lighting-region-hit') ||
+      target.getAttribute?.('data-lighting-region') === '1';
+    if (onRegionEdge) {
+      return { kind: 'lighting-region', id: LIGHTING_REGION_ID };
+    }
+  }
+
+  const bgResize = target.dataset?.bgResize || target.getAttribute?.('data-bg-resize');
+  if (bgResize) return { kind: 'background', id: BG_TRACE_ID, resize: bgResize };
+  if (
+    target.classList?.contains('trace-hit') ||
+    target.getAttribute?.('data-bg') === '1'
+  ) {
+    return { kind: 'background', id: BG_TRACE_ID };
+  }
+
   return null;
+}
+
+/** Hit-test across stacked canvas SVG layers (base / items / overlay). */
+function hitTest(evt) {
+  const stack = document.elementsFromPoint(evt.clientX, evt.clientY);
+  /** @type {ReturnType<typeof hitTestFromElement>[]} */
+  const hits = [];
+  for (const el of stack) {
+    if (el.id === 'lighting-canvas' || el.tagName === 'CANVAS') continue;
+    const hit = hitTestFromElement(el);
+    if (hit) hits.push(hit);
+  }
+  if (!hits.length) return hitTestFromElement(evt.target);
+
+  for (const kind of HIT_TEST_PRIORITY) {
+    const found = hits.find((h) => h.kind === kind);
+    if (found) return found;
+  }
+  return hits[0];
 }
 
 function shouldPan(evt) {
@@ -1912,7 +2533,47 @@ function onPointerDown(evt) {
   }
 
   if (state.mode === 'furnish') {
+    if (state.placingLightType && (!hit || hit.kind === 'item')) {
+      const w = screenToWorld(pt.x, pt.y);
+      addLight(state.placingLightType, w.x, w.y);
+      cancelPlacingLight();
+      return;
+    }
     if (state.placingCatalogType && !hit) {
+      const cat = CATALOG[state.placingCatalogType];
+      const w = screenToWorld(pt.x, pt.y);
+      addItem(
+        state.placingCatalogType,
+        w.x - (cat?.w || 2) / 2,
+        w.y - (cat?.h || 2) / 2
+      );
+      cancelPlacingCatalog();
+      return;
+    }
+    if (hit?.kind === 'lighting-region') {
+      cancelPlacingCatalog();
+      cancelPlacingLight();
+      cancelPlacingLabel();
+      const region = getLightingRegion();
+      if (!isSelected('lighting-region', LIGHTING_REGION_ID)) {
+        selectOne('lighting-region', LIGHTING_REGION_ID);
+      }
+      if (hit.resize) {
+        assignDrag(
+          {
+            type: 'lighting-region-resize',
+            corner: hit.resize,
+            start: pt,
+            orig: { x: region.x, y: region.y, w: region.width, h: region.height },
+          },
+          evt
+        );
+      } else {
+        assignDrag(
+          { type: 'lighting-region-move', start: pt, orig: { x: region.x, y: region.y } },
+          evt
+        );
+      }
       return;
     }
     if (hit?.kind === 'background') {
@@ -1941,6 +2602,7 @@ function onPointerDown(evt) {
     }
     if (hit?.kind === 'label') {
       cancelPlacingCatalog();
+      cancelPlacingLight();
       cancelPlacingLabel();
       if (!isMobileTouchUI()) {
         if (!isSelected('label', hit.id)) selectHit(hit, evt.shiftKey);
@@ -1957,6 +2619,44 @@ function onPointerDown(evt) {
       const w = screenToWorld(pt.x, pt.y);
       addRoomLabel(w.x, w.y);
       cancelPlacingLabel();
+      return;
+    }
+    if (hit?.kind === 'light') {
+      cancelPlacingCatalog();
+      cancelPlacingLight();
+      cancelPlacingLabel();
+      if (evt.altKey) {
+        const src = getLight(hit.id);
+        const copy = {
+          ...src,
+          id: uid('light'),
+          x: snapFt(src.x),
+          y: snapFt(src.y),
+        };
+        if (!state.layout.lights) state.layout.lights = [];
+        state.layout.lights.push(copy);
+        selectOne('light', copy.id);
+        assignDrag(
+          {
+            type: 'light-move',
+            id: copy.id,
+            start: pt,
+            orig: { x: copy.x, y: copy.y },
+            duplicated: true,
+          },
+          evt
+        );
+        return;
+      }
+      if (!isMobileTouchUI()) {
+        if (!isSelected('light', hit.id)) selectHit(hit, evt.shiftKey);
+        else if (evt.shiftKey) selectHit(hit, true);
+      }
+      const light = getLight(hit.id);
+      assignDrag(
+        { type: 'light-move', id: hit.id, start: pt, orig: { x: light.x, y: light.y } },
+        evt
+      );
       return;
     }
     if (hit?.kind === 'item') {
@@ -2124,6 +2824,16 @@ function onPointerMove(evt) {
     return;
   }
 
+  if (state.drag.type === 'light-move') {
+    const light = getLight(state.drag.id);
+    if (light) {
+      light.x = snapFt(state.drag.orig.x + pxToFt(dx));
+      light.y = snapFt(state.drag.orig.y + pxToFt(dy));
+    }
+    renderDuringLayoutDrag();
+    return;
+  }
+
   if (state.drag.type === 'item-move') {
     const dxf = pxToFt(dx);
     const dyf = pxToFt(dy);
@@ -2175,6 +2885,31 @@ function onPointerMove(evt) {
       bg.width = stub.w;
       bg.height = stub.h;
     }
+    renderDuringLayoutDrag();
+    return;
+  }
+
+  if (state.drag.type === 'lighting-region-move') {
+    const region = getLightingRegion();
+    region.x = snapFt(state.drag.orig.x + pxToFt(dx));
+    region.y = snapFt(state.drag.orig.y + pxToFt(dy));
+    renderDuringLayoutDrag();
+    return;
+  }
+
+  if (state.drag.type === 'lighting-region-resize') {
+    const region = getLightingRegion();
+    const stub = {
+      x: region.x,
+      y: region.y,
+      w: region.width,
+      h: region.height,
+    };
+    applyResize(stub, state.drag.corner, pxToFt(dx), pxToFt(dy), evt.shiftKey, evt);
+    region.x = stub.x;
+    region.y = stub.y;
+    region.width = Math.max(4, stub.w);
+    region.height = Math.max(4, stub.h);
     renderDuringLayoutDrag();
     return;
   }
@@ -2247,6 +2982,10 @@ function dragMutatedLayout(drag) {
     const lbl = getRoomLabel(drag.id);
     return lbl && (lbl.x !== drag.orig.x || lbl.y !== drag.orig.y);
   }
+  if (drag.type === 'light-move') {
+    const light = getLight(drag.id);
+    return light && (light.x !== drag.orig.x || light.y !== drag.orig.y);
+  }
   if (drag.type === 'wall-move' || drag.type === 'wall-endpoint') {
     const w = getWall(drag.id);
     const o = drag.orig;
@@ -2265,6 +3004,20 @@ function dragMutatedLayout(drag) {
         bg.y !== drag.orig.y ||
         bg.width !== drag.orig.w ||
         bg.height !== drag.orig.h)
+    );
+  }
+  if (drag.type === 'lighting-region-move' && drag.orig) {
+    const region = getLightingRegion();
+    return region && (region.x !== drag.orig.x || region.y !== drag.orig.y);
+  }
+  if (drag.type === 'lighting-region-resize' && drag.orig) {
+    const region = getLightingRegion();
+    return (
+      region &&
+      (region.x !== drag.orig.x ||
+        region.y !== drag.orig.y ||
+        region.width !== drag.orig.w ||
+        region.height !== drag.orig.h)
     );
   }
   if (drag.type === 'resize' && drag.orig) {
@@ -2309,9 +3062,12 @@ function onPointerUp(evt) {
     const historyTypes = [
       'item-move',
       'label-move',
+      'light-move',
       'resize',
       'bg-move',
       'bg-resize',
+      'lighting-region-move',
+      'lighting-region-resize',
       'rotate-drag',
       'wall-move',
       'wall-endpoint',
@@ -2339,6 +3095,12 @@ function onPointerUp(evt) {
           lbl.x = snapFt(lbl.x);
           lbl.y = snapFt(lbl.y);
         }
+      } else if (drag.type === 'light-move') {
+        const light = getLight(drag.id);
+        if (light) {
+          light.x = snapFt(light.x);
+          light.y = snapFt(light.y);
+        }
       } else if (drag.type === 'resize') {
         const item = getItem(drag.id);
         if (item) {
@@ -2361,6 +3123,20 @@ function onPointerUp(evt) {
           bg.width = snapFt(bg.width);
           bg.height = snapFt(bg.height);
         }
+      } else if (drag.type === 'lighting-region-move') {
+        const region = getLightingRegion();
+        if (region) {
+          region.x = snapFt(region.x);
+          region.y = snapFt(region.y);
+        }
+      } else if (drag.type === 'lighting-region-resize') {
+        const region = getLightingRegion();
+        if (region) {
+          region.x = snapFt(region.x);
+          region.y = snapFt(region.y);
+          region.width = Math.max(4, snapFt(region.width));
+          region.height = Math.max(4, snapFt(region.height));
+        }
       } else if (drag.type === 'rotate-drag') {
         const item = getItem(drag.id);
         if (item) item.rotation = snapRotationDeg(item.rotation || 0, evt.shiftKey ? 15 : 5);
@@ -2370,6 +3146,10 @@ function onPointerUp(evt) {
     state.drag = null;
     updatePanCursor();
     canvas()?.releasePointerCapture(evt.pointerId);
+    if (state.showLighting && dragAffectsLighting(drag)) {
+      setLightingDraftMode(false);
+      invalidateLighting(true);
+    }
   }
 }
 
@@ -2386,10 +3166,15 @@ function onWheel(evt) {
 
 function onDrop(evt) {
   evt.preventDefault();
-  const type = evt.dataTransfer.getData('application/x-item-type');
-  if (!type) return;
+  const lightType = evt.dataTransfer.getData('application/x-light-type');
   const pt = getSvgPoint(evt);
   const w = screenToWorld(pt.x, pt.y);
+  if (lightType) {
+    addLight(lightType, w.x, w.y);
+    return;
+  }
+  const type = evt.dataTransfer.getData('application/x-item-type');
+  if (!type) return;
   addItem(type, w.x - (CATALOG[type]?.w || 2) / 2, w.y - (CATALOG[type]?.h || 2) / 2);
 }
 
@@ -2428,7 +3213,7 @@ function catalogMatchesQuery(type, v, query) {
 function buildCatalog() {
   const root = $('#catalog-list');
   const query = state.catalogQuery;
-  root.innerHTML = CATEGORIES.map((cat) => {
+  const furnitureHtml = CATEGORIES.map((cat) => {
     const items = Object.entries(CATALOG).filter(
       ([type, v]) => v.category === cat.id && catalogMatchesQuery(type, v, query)
     );
@@ -2445,11 +3230,28 @@ function buildCatalog() {
     return `<details class="catalog-group" open><summary>${cat.label}</summary>${buttons}</details>`;
   }).join('');
 
+  const lightItems = Object.entries(LIGHT_TYPES).filter(([type, v]) =>
+    lightMatchesQuery(type, v, query)
+  );
+  const lightingHtml = lightItems.length
+    ? `<details class="catalog-group" open><summary>Lighting</summary>${lightItems
+        .map(
+          ([type, v]) => `
+      <button type="button" class="catalog-item catalog-item--light" draggable="${isMobileTouchUI() ? 'false' : 'true'}" data-light-type="${type}" data-label="${v.label}">
+        <span class="thumb thumb--light" style="width:${Math.min(24, v.sizeFt * 10)}px;height:${Math.min(24, v.sizeFt * 10)}px"></span>
+        <span><span>${v.label}</span><br><span class="dims">${v.radiusFt}′ radius · ${v.kelvin}K</span></span>
+      </button>`
+        )
+        .join('')}</details>`
+    : '';
+
+  root.innerHTML = lightingHtml + furnitureHtml;
+
   if (!root.innerHTML.trim()) {
     root.innerHTML = `<p class="empty-state">No catalog items match “${query}”.</p>`;
   }
 
-  root.querySelectorAll('.catalog-item').forEach((btn) => {
+  root.querySelectorAll('.catalog-item[data-type]').forEach((btn) => {
     btn.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('application/x-item-type', btn.dataset.type);
       e.dataTransfer.effectAllowed = 'copy';
@@ -2457,8 +3259,25 @@ function buildCatalog() {
     btn.addEventListener('click', () => {
       if (!isMobileTouchUI()) return;
       cancelPlacingLabel();
+      cancelPlacingLight();
       state.placingCatalogType = btn.dataset.type;
       $('.canvas-wrap')?.classList.add('placing-item');
+      collapseMobilePanelsForCanvas();
+      toast(`Tap the floor to place ${btn.dataset.label}`);
+    });
+  });
+
+  root.querySelectorAll('.catalog-item[data-light-type]').forEach((btn) => {
+    btn.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('application/x-light-type', btn.dataset.lightType);
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+    btn.addEventListener('click', () => {
+      if (!isMobileTouchUI()) return;
+      cancelPlacingLabel();
+      cancelPlacingCatalog();
+      state.placingLightType = btn.dataset.lightType;
+      $('.canvas-wrap')?.classList.add('placing-light');
       collapseMobilePanelsForCanvas();
       toast(`Tap the floor to place ${btn.dataset.label}`);
     });
@@ -2481,8 +3300,9 @@ function bindHotkeys() {
     } else if (mod && e.shiftKey && (e.key === 'n' || e.key === 'N')) {
       e.preventDefault();
       clearFloorplan();
-    } else if (e.key === 'v' || e.key === 'V') setMode('furnish');
+    }     else if (e.key === 'v' || e.key === 'V') setMode('furnish');
     else if (e.key === 'e' || e.key === 'E') setMode('walls');
+    else if (e.key === 'l' || e.key === 'L') toggleLightingPreview();
     else if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
     else if (e.key === 'r' || e.key === 'R') rotateSelected(90);
     else if (e.key === 'Escape') {
@@ -2493,10 +3313,10 @@ function bindHotkeys() {
       duplicateSelected();
     } else if (e.key === ']' && !mod) {
       const sel = primarySelection();
-      if (sel?.kind === 'item') bringItemForward(sel.id);
+      if (sel?.kind === 'item' || sel?.kind === 'light') bringDrawableForward(sel.kind, sel.id);
     } else if (e.key === '[' && !mod) {
       const sel = primarySelection();
-      if (sel?.kind === 'item') sendItemBackward(sel.id);
+      if (sel?.kind === 'item' || sel?.kind === 'light') sendDrawableBackward(sel.kind, sel.id);
     } else if (e.key === '{' && !mod) {
       e.preventDefault();
       togglePanel('left');
@@ -2670,24 +3490,67 @@ function bindUI() {
   wrap?.addEventListener('pointerleave', hideWallLengthTip);
   wrap?.addEventListener('pointerup', onPointerUp);
   wrap?.addEventListener('pointercancel', onPointerUp);
+  wrap?.addEventListener('wheel', onWheel, { passive: false });
+  wrap?.addEventListener('dragover', (e) => e.preventDefault());
+  wrap?.addEventListener('drop', onDrop);
   bindMobileTouch();
   svg?.addEventListener('contextmenu', (e) => e.preventDefault());
   svg?.addEventListener('auxclick', (e) => e.preventDefault());
-  svg?.addEventListener('wheel', onWheel, { passive: false });
-  svg?.addEventListener('dragover', (e) => e.preventDefault());
-  svg?.addEventListener('drop', onDrop);
   svg?.addEventListener('dblclick', onLabelDblClick);
 
   document.body.addEventListener('dragover', (e) => {
-    if (e.dataTransfer.types.includes('application/x-item-type')) e.preventDefault();
+    if (
+      e.dataTransfer.types.includes('application/x-item-type') ||
+      e.dataTransfer.types.includes('application/x-light-type')
+    ) {
+      e.preventDefault();
+    }
   });
+
+  $('#btn-lighting-preview')?.addEventListener('click', toggleLightingPreview);
+
+  initLightingCanvas(() => ({
+    layout: state.layout,
+    region: getLightingRegion(),
+    show: state.showLighting && (state.layout.lights || []).length > 0,
+  }));
+  setLightingViewSync(() => ({
+    pan: state.pan,
+    zoom: state.zoom,
+    pxPerFt: PX_PER_FT,
+  }));
+  if (state.showLighting) invalidateLighting(true);
+}
+
+function toggleLightingPreview() {
+  const lightCount = (state.layout.lights || []).length;
+  if (!lightCount) {
+    toast('Add lights from the Lighting catalog first');
+    return;
+  }
+  state.showLighting = !state.showLighting;
+  const btn = $('#btn-lighting-preview');
+  btn?.classList.toggle('active', state.showLighting);
+  btn?.setAttribute('aria-pressed', state.showLighting ? 'true' : 'false');
+  render();
+  toast(
+    state.showLighting
+      ? 'Lighting preview on — computed floor lightmap with soft shadows'
+      : 'Lighting preview off — fixture markers only'
+  );
+  if (state.showLighting) invalidateLighting(true);
 }
 
 function resizeCanvas() {
   const wrap = $('.canvas-wrap');
-  const svg = canvas();
-  svg.setAttribute('width', wrap.clientWidth);
-  svg.setAttribute('height', wrap.clientHeight);
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  for (const el of [canvasBase(), canvasItems(), canvas()]) {
+    if (el) {
+      el.setAttribute('width', w);
+      el.setAttribute('height', h);
+    }
+  }
   render();
 }
 

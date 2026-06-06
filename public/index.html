@@ -32,6 +32,9 @@
           <button type="button" class="btn icon" id="btn-mode-walls" data-mode="walls" title="Edit floorplan (E)" aria-label="Edit floorplan mode">
             <i data-lucide="pencil-ruler" class="btn-icon" aria-hidden="true"></i>
           </button>
+          <button type="button" class="btn icon active" id="btn-lighting-preview" title="Lighting preview (L)" aria-pressed="true" aria-label="Toggle lighting preview">
+            <i data-lucide="lightbulb" class="btn-icon" aria-hidden="true"></i>
+          </button>
         </div>
         <div class="toolbar-group toolbar-group--panels">
           <button type="button" class="btn icon panel-toolbar-btn" id="btn-panel-left" title="Toggle catalog ({)" aria-pressed="false" aria-controls="panel-left" aria-label="Toggle catalog panel">
@@ -133,9 +136,9 @@
       <div class="panel-body">
       <h2>Catalog</h2>
       <div class="panel-search">
-        <input type="search" id="catalog-search" placeholder="Search furniture…" autocomplete="off" aria-label="Search catalog">
+        <input type="search" id="catalog-search" placeholder="Search catalog…" autocomplete="off" aria-label="Search catalog">
       </div>
-      <p class="panel-hint">Drag items onto the floor</p>
+      <p class="panel-hint">Drag furniture or lights onto the floor</p>
       <div id="catalog-list" class="panel-section panel-scroll"></div>
 
       <h2>Sessions</h2>
@@ -151,6 +154,9 @@
     </aside>
 
     <main class="canvas-wrap">
+      <svg id="floor-canvas-base" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
+      <svg id="floor-canvas-items" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
+      <canvas id="lighting-canvas" aria-hidden="true"></canvas>
       <svg id="floor-canvas" xmlns="http://www.w3.org/2000/svg" aria-label="Floor plan canvas"></svg>
     </main>
 
@@ -225,6 +231,9 @@
       <ul style="margin:0;padding:8px 12px 12px 24px;font-size:12px;color:var(--muted);line-height:1.7">
         <li><strong>V</strong> — Furnish mode</li>
         <li><strong>E</strong> — Edit floorplan</li>
+        <li><strong>L</strong> — Toggle floor lightmap preview</li>
+        <li><strong>Lighting catalog</strong> — Drag lights onto the floor; edit temperature, radius, and intensity in Properties</li>
+        <li><strong>Lighting region</strong> — With preview on, click the dashed frame to select; resize to set where the lightmap is computed; choose quality in Properties</li>
         <li><strong>Shift+drag</strong> — Draw wall (edit mode)</li>
         <li><strong>Click label</strong> — Select; edit text, position, size in Properties (furnish mode)</li>
         <li><strong>Double-click label</strong> — Focus label text field</li>

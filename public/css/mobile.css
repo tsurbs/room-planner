@@ -122,11 +122,16 @@ html {
 }
 
 .canvas-wrap.placing-item,
+.canvas-wrap.placing-light,
 .canvas-wrap.placing-label {
   cursor: crosshair;
 }
 
+.canvas-wrap.placing-item #floor-canvas-items,
 .canvas-wrap.placing-item #floor-canvas,
+.canvas-wrap.placing-light #floor-canvas-items,
+.canvas-wrap.placing-light #floor-canvas,
+.canvas-wrap.placing-label #floor-canvas-items,
 .canvas-wrap.placing-label #floor-canvas {
   cursor: crosshair;
 }

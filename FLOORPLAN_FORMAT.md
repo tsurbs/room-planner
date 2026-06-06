@@ -35,6 +35,7 @@
   "openings": [ Opening, ... ],
   "roomLabels": [ RoomLabel, ... ],
   "items": [ Item, ... ],
+  "lights": [ Light, ... ],
   "backgroundImage": BackgroundImage,
   "meta": { "created": "ISO-8601 string", "source": "string", ... }
 }
@@ -52,6 +53,8 @@
 | `openings` | `Opening[]` | no | Omit or `[]`; app treats missing as `[]` |
 | `roomLabels` | `RoomLabel[]` | no | Omit or `[]`; app treats missing as `[]` |
 | `items` | `Item[]` | **yes** | May be `[]`; array must exist for import |
+| `lights` | `Light[]` | no | Omit or `[]`; simulated lighting for plan-view preview |
+| `lightingRegion` | object | no | `{ x, y, width, height }` in feet; bounds for the computed floor lightmap (auto-created if omitted) |
 | `backgroundImage` | `BackgroundImage` | no | Optional trace/reference image behind the grid |
 | `meta` | object | no | Free-form metadata; not validated |
 
@@ -189,6 +192,64 @@ Unknown `type` values still render as a rectangle with the type string as label;
 | **outdoor** | `round-table`, `patio-chair` |
 | **office** | `desk`, `bookshelf` |
 | **decor** | `rug`, `plant` |
+
+---
+
+## Light (simulated lighting)
+
+Point lights for plan-view illumination preview. Position is the **center** of the fixture in feet.
+
+```json
+{
+  "id": "light-1",
+  "type": "recessed-s",
+  "x": 12,
+  "y": 8,
+  "sizeFt": 0.75,
+  "radiusFt": 6,
+  "kelvin": 3000,
+  "intensity": 0.75
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `id` | `string` | **yes** | Unique among lights |
+| `type` | `string` | **yes** | Preset key (see `js/lighting.js`) |
+| `x`, `y` | `number` | **yes** | Center position (feet) |
+| `sizeFt` | `number` | no | Visible fixture diameter (feet); defaults from preset |
+| `radiusFt` | `number` | no | Light spill radius on the floor (feet) |
+| `kelvin` | `number` | no | Color temperature 2000–6500 K; defaults from preset |
+| `intensity` | `number` | no | Brightness 0.1–1; default `0.75` |
+
+### Light `type` presets (`js/lighting.js`)
+
+| type | Label | sizeFt | radiusFt | default K |
+|------|-------|--------|----------|-----------|
+| `recessed-s` | Recessed (small) | 0.75 | 6 | 3000 |
+| `recessed-l` | Recessed (large) | 1.25 | 9 | 3500 |
+| `pendant` | Pendant | 1.5 | 8 | 3000 |
+| `chandelier` | Chandelier | 2.5 | 14 | 2700 |
+| `floor-lamp` | Floor lamp | 1.5 | 7 | 2700 |
+| `track` | Track spot | 0.6 | 5 | 4000 |
+
+### Lighting region
+
+Optional rectangle (feet) defining where the app computes the **floor lightmap**. Each grid cell inside the region gets RGB from additive kelvin-tinted light with line-of-sight occlusion through **walls only** — furniture never blocks light rays in the simulation. In lighting preview, the lightmap is drawn under semi-transparent furniture so floor glow shows through item footprints. Quality (Draft / Normal / High) controls grid density and soft-shadow samples in the Properties panel when the region is selected. If omitted, the app computes a default from walls, lights, and grid bounds with padding.
+
+```json
+{
+  "x": -6,
+  "y": -6,
+  "width": 54,
+  "height": 54
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `x`, `y` | `number` | **yes** | Top-left corner (feet) |
+| `width`, `height` | `number` | **yes** | Size in feet; minimum 4 when edited in the UI |
 
 ### Default catalog dimensions (feet)
 

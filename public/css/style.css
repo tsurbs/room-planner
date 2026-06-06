@@ -631,34 +631,79 @@ body {
   -webkit-user-select: none;
 }
 
-.canvas-wrap.cursor-grab,
-#floor-canvas.cursor-grab {
-  cursor: grab;
-}
-
-.canvas-wrap.cursor-grabbing,
-#floor-canvas.cursor-grabbing {
-  cursor: grabbing;
-}
-
-#floor-canvas {
-  display: block;
+#lighting-canvas {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
-  cursor: default;
+  z-index: 1;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+#floor-canvas-base,
+#floor-canvas-items,
+#floor-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
 
-#floor-canvas.mode-furnish .item {
+#floor-canvas-base {
+  z-index: 0;
+  pointer-events: none;
+}
+
+#floor-canvas-items {
+  z-index: 2;
+  pointer-events: none;
+}
+
+#floor-canvas {
+  z-index: 3;
+  cursor: default;
+  pointer-events: none;
+}
+
+#floor-canvas-items .item,
+#floor-canvas-items .selection-handles-layer {
+  pointer-events: all;
+}
+
+#floor-canvas-base .wall-hit-area,
+#floor-canvas-base .wall-hit,
+#floor-canvas-base .wall-endpoint-handle {
+  pointer-events: stroke;
+}
+
+#floor-canvas-base .wall-endpoint-handle {
+  pointer-events: all;
+}
+
+#floor-canvas .room-label-hit,
+#floor-canvas .light-fixture-hit,
+#floor-canvas .lighting-region-hit,
+#floor-canvas .lighting-region-handle,
+#floor-canvas .trace-hit,
+#floor-canvas .trace-handle {
+  pointer-events: all;
+}
+
+#floor-canvas-items.mode-furnish .item {
   cursor: grab;
 }
 
+#floor-canvas-base.mode-walls .wall-hit,
 #floor-canvas.mode-walls .wall-hit {
   cursor: move;
 }
 
+#floor-canvas-base.mode-walls .wall-endpoint-handle,
 #floor-canvas.mode-walls .wall-endpoint {
   cursor: crosshair;
 }
@@ -820,6 +865,82 @@ body {
   user-select: none;
 }
 
+.floor-fixtures-layer .light-fixture-hit {
+  pointer-events: all;
+}
+
+.canvas-wrap.lighting-preview-on .room-label {
+  fill: #c8ccd4;
+  opacity: 0.85;
+}
+
+.canvas-wrap.lighting-preview-on .item-rect {
+  fill-opacity: 0.4;
+}
+
+.canvas-wrap.lighting-preview-on .item-rect.fixture {
+  fill-opacity: 0.45;
+}
+
+.light-fixture-marker {
+  fill: #8a8a8a;
+  stroke: #5c5c5c;
+  stroke-width: 1;
+}
+
+.light-fixture-ring {
+  fill: rgba(255, 255, 255, 0.92);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.light-fixture-core {
+  pointer-events: none;
+}
+
+.light-fixture-hit {
+  cursor: grab;
+}
+
+.light-fixture.selected .light-fixture-hit {
+  cursor: grabbing;
+}
+
+.light-fixture-label {
+  fill: var(--muted);
+  pointer-events: none;
+  user-select: none;
+}
+
+.light-radius-guide {
+  pointer-events: none;
+}
+
+.light-temp-swatch {
+  height: 10px;
+  border-radius: 4px;
+  margin: 4px 0 10px;
+  border: 1px solid var(--border);
+}
+
+.catalog-item .thumb--light {
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #fff8e8 0%, #ffd88a 45%, #c8a050 100%);
+  box-shadow: 0 0 6px rgba(255, 200, 100, 0.5);
+}
+
+.canvas-wrap.placing-light {
+  cursor: crosshair;
+}
+
+.canvas-wrap.placing-light #floor-canvas {
+  cursor: crosshair;
+}
+
+#floor-canvas.mode-furnish .light-fixture {
+  cursor: grab;
+}
+
 .room-label-hit {
   fill: transparent;
   stroke: none;
@@ -903,6 +1024,24 @@ body {
 
 #floor-canvas.mode-furnish .trace-handle[data-bg-resize='ne'],
 #floor-canvas.mode-furnish .trace-handle[data-bg-resize='sw'] {
+  cursor: nesw-resize;
+}
+
+.lighting-region-hit {
+  pointer-events: stroke;
+  cursor: grab;
+}
+
+.lighting-region-layer.selected .lighting-region-hit {
+  cursor: grab;
+}
+
+#floor-canvas.mode-furnish .lighting-region-handle {
+  cursor: nwse-resize;
+}
+
+#floor-canvas.mode-furnish .lighting-region-handle[data-lighting-region-resize='ne'],
+#floor-canvas.mode-furnish .lighting-region-handle[data-lighting-region-resize='sw'] {
   cursor: nesw-resize;
 }
 
