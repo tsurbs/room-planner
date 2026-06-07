@@ -35,11 +35,11 @@ body {
 }
 
 .app {
-  --col-left: minmax(240px, 280px);
-  --col-right: minmax(260px, 300px);
+  --panel-left-width: 280px;
+  --panel-right-width: 320px;
   --col-collapsed: 40px;
   display: grid;
-  grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
+  grid-template-columns: var(--panel-left-width) minmax(0, 1fr) var(--panel-right-width);
   grid-template-rows: 40px minmax(0, 1fr) 28px;
   height: 100vh;
   width: 100%;
@@ -47,11 +47,15 @@ body {
 }
 
 .app.left-collapsed {
-  --col-left: var(--col-collapsed);
+  grid-template-columns: var(--col-collapsed) minmax(0, 1fr) var(--panel-right-width);
 }
 
 .app.right-collapsed {
-  --col-right: var(--col-collapsed);
+  grid-template-columns: var(--panel-left-width) minmax(0, 1fr) var(--col-collapsed);
+}
+
+.app.left-collapsed.right-collapsed {
+  grid-template-columns: var(--col-collapsed) minmax(0, 1fr) var(--col-collapsed);
 }
 
 /* —— Top bar —— */
@@ -216,6 +220,28 @@ body {
   width: 100%;
   gap: 8px;
   text-align: left;
+}
+
+.toolbar-menu-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+}
+
+.toolbar-menu-toggle:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+}
+
+.toolbar-menu-toggle input {
+  margin: 0;
+  flex-shrink: 0;
 }
 
 .toolbar-more-menu #sync-badge {
@@ -424,12 +450,101 @@ body {
   overflow-x: hidden;
 }
 
-.panel-left #catalog-list {
-  flex: 2 1 0;
+.panel-split {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
 }
 
-.panel-left #sessions-panel {
+.panel-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.panel-pane--grow {
   flex: 1 1 0;
+  min-height: 72px;
+}
+
+.panel-splitter {
+  flex: 0 0 7px;
+  position: relative;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.panel-splitter::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 3px;
+  height: 1px;
+  background: var(--border);
+  border-radius: 1px;
+  transition: background 0.12s, height 0.12s;
+}
+
+.panel-splitter:hover::after,
+.panel-splitter.is-dragging::after {
+  top: 2px;
+  height: 3px;
+  background: var(--accent);
+}
+
+.panel-edge-resize {
+  flex: 0 0 5px;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.panel-edge-resize::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 2px;
+  width: 1px;
+  background: var(--border);
+  border-radius: 1px;
+  transition: background 0.12s, width 0.12s;
+}
+
+.panel-left .panel-edge-resize::after {
+  right: 2px;
+  left: auto;
+}
+
+.panel-edge-resize:hover::after,
+.panel-edge-resize.is-dragging::after {
+  width: 3px;
+  background: var(--accent);
+}
+
+body.is-panel-resizing {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+body.is-panel-resizing * {
+  cursor: col-resize !important;
+}
+
+body.is-split-resizing {
+  cursor: row-resize !important;
+  user-select: none;
+}
+
+.app.left-collapsed .panel-left .panel-edge-resize,
+.app.right-collapsed .panel-right .panel-edge-resize {
+  display: none;
 }
 
 .panel-subhead {
@@ -605,6 +720,148 @@ body {
   border-color: var(--accent);
 }
 
+#props-panel label:not(.prop-row label) {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+#props-panel label:not(.prop-row label) input,
+#props-panel label:not(.prop-row label) textarea,
+#props-panel label:not(.prop-row label) select {
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+  background: var(--surface);
+  color: var(--text);
+}
+
+#props-panel textarea {
+  resize: vertical;
+  min-height: 72px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.wysiwyg-field {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-bottom: 8px;
+}
+
+.wysiwyg-toolbar {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--bg);
+}
+
+.wysiwyg-btn {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wysiwyg-btn:hover {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.wysiwyg-editor {
+  min-height: 96px;
+  max-height: none;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.wysiwyg-editor:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.wysiwyg-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.wysiwyg-editor ul,
+.wysiwyg-editor ol {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+
+.wysiwyg-editor p {
+  margin: 0 0 6px;
+}
+
+.wysiwyg-editor p:last-child {
+  margin-bottom: 0;
+}
+
+.prop-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.prop-section-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.featured-image-field {
+  margin-bottom: 8px;
+}
+
+.featured-image-field .field-label {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.featured-image-preview {
+  display: block;
+  width: 100%;
+  max-height: 100px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+
+.featured-image-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .empty-state {
   padding: 16px 12px;
   color: var(--muted);
@@ -631,7 +888,8 @@ body {
   -webkit-user-select: none;
 }
 
-#lighting-canvas {
+#lighting-canvas,
+#lighting-canvas-gl {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -842,6 +1100,86 @@ body {
   white-space: nowrap;
 }
 
+.element-hover-card {
+  position: fixed;
+  z-index: 91;
+  max-width: 260px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  pointer-events: auto;
+}
+
+.element-hover-card__image {
+  display: block;
+  width: 100%;
+  max-height: 140px;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.element-hover-card__image.hidden {
+  display: none;
+}
+
+.element-hover-card__notes:empty {
+  display: none;
+}
+
+.element-hover-card__notes p {
+  margin: 0 0 6px;
+}
+
+.element-hover-card__notes p:last-child {
+  margin-bottom: 0;
+}
+
+.element-hover-card__notes h3,
+.element-hover-card__notes h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.element-hover-card__notes ul,
+.element-hover-card__notes ol {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+
+.element-hover-card__notes a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.element-hover-card__link {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  word-break: break-all;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.element-hover-card__link.hidden {
+  display: none;
+}
+
+.element-hover-card__link::before {
+  content: '↗ ';
+}
+
+.element-hover-card__link:hover {
+  color: var(--text);
+}
+
 .item-rect {
   fill: #f0eeea;
   stroke: #c8c5be;
@@ -867,6 +1205,46 @@ body {
 
 .floor-fixtures-layer .light-fixture-hit {
   pointer-events: all;
+}
+
+/* Lighting preview: dark backdrop so transparent lightmap areas (exterior and
+   the wall-occlusion band) read dark instead of revealing the pale page bg as a
+   glow hugging the walls. */
+.canvas-wrap.lighting-preview-on {
+  background: #0c0e13;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+}
+
+/* Blue wall outline drawn above the lightmap so walls stay legible in the dark. */
+.lighting-wall-overlay {
+  pointer-events: none;
+}
+
+.lighting-wall-overlay .wall-overlay-line {
+  fill: none;
+  stroke: #5aa9e6;
+  stroke-width: 3;
+  stroke-linecap: square;
+}
+
+.lighting-wall-overlay .wall-overlay-line.exterior {
+  stroke: #7cc0ff;
+  stroke-width: 4;
+}
+
+.lighting-wall-overlay .opening-overlay {
+  stroke-linecap: butt;
+}
+
+.lighting-wall-overlay .opening-overlay-window {
+  stroke: #d2e9ff;
+  stroke-width: 4;
+}
+
+/* Door = punch a gap in the blue wall using the backdrop colour. */
+.lighting-wall-overlay .opening-overlay-door {
+  stroke: #0c0e13;
+  stroke-width: 6;
 }
 
 .canvas-wrap.lighting-preview-on .room-label {

@@ -31,7 +31,9 @@ import {
   setLightingDraftMode,
   setLightingQuality,
   getLightingQuality,
+  setLightingHardwareAccel,
 } from './lighting-canvas.js';
+import { loadLightingSettings, saveLightingSettings } from './lighting-settings.js';
 import * as sync from './sync.js';
 import {
   buildLayoutCommand,
@@ -42,6 +44,12 @@ import {
 
 const STORAGE_KEY = 'room-planner-layout';
 const STORAGE_SLOTS_KEY = 'room-planner-saves';
+const PANEL_WIDTH_DEFAULT = { left: 280, right: 320 };
+const PANEL_WIDTH_MIN = { left: 220, right: 260 };
+const PANEL_WIDTH_MAX = { left: 480, right: 560 };
+const PANEL_SPLIT_DEFAULT = { 'left-catalog': 0.62, 'right-props': 0.72 };
+const PANEL_SPLIT_MIN = 0.2;
+const PANEL_SPLIT_MIN_PX = 72;
 const PANELS_STORAGE_KEY = 'room-planner-panels';
 const PX_PER_FT = 14;
 const BG_TRACE_ID = 'trace';
@@ -71,6 +79,8 @@ const state = {
   spaceHeld: false,
   catalogQuery: '',
   panels: { left: false, right: false },
+  panelWidths: { left: 280, right: 320 },
+  panelSplits: { 'left-catalog': 0.62, 'right-props': 0.72 },
   placingLabel: false,
   placingCatalogType: null,
   placingLightType: null,
@@ -78,6 +88,13 @@ const state = {
   wallDrawTool: false,
   lastLabelTap: { id: null, t: 0 },
 };
+
+/** @type {{ kind: 'item'|'light', id: string } | null} */
+let featuredImageTarget = null;
+/** @type {{ kind: 'item'|'light', id: string } | null} */
+let elementHoverPin = null;
+let pointerOverHoverCard = false;
+let elementHoverHideTimer = null;
 
 function isMobileTouchUI() {
   return window.matchMedia(MOBILE_MQ).matches;
@@ -176,6 +193,10 @@ function renderItemSelectionOverlay(svg) {
 }
 
 const $ = (sel) => document.querySelector(sel);
+
+function isTextEditingTarget(target) {
+  return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"]');
+}
 const canvas = () => $('#floor-canvas');
 const canvasItems = () => $('#floor-canvas-items');
 const canvasBase = () => $('#floor-canvas-base');
@@ -237,8 +258,32 @@ function loadPanelState() {
       const data = JSON.parse(raw);
       if (typeof data.left === 'boolean') state.panels.left = data.left;
       if (typeof data.right === 'boolean') state.panels.right = data.right;
+      if (data.widths && typeof data.widths === 'object') {
+        if (typeof data.widths.left === 'number') state.panelWidths.left = data.widths.left;
+        if (typeof data.widths.right === 'number') state.panelWidths.right = data.widths.right;
+      }
+      if (data.splits && typeof data.splits === 'object') {
+        for (const [key, val] of Object.entries(data.splits)) {
+          if (typeof val === 'number') {
+            state.panelSplits[key] = Math.max(
+              PANEL_SPLIT_MIN,
+              Math.min(1 - PANEL_SPLIT_MIN, val)
+            );
+          }
+        }
+      }
     }
   } catch (_) {}
+  if (!isMobileTouchUI()) {
+    state.panelWidths.left = clampPanelWidth(
+      'left',
+      state.panelWidths.left ?? PANEL_WIDTH_DEFAULT.left
+    );
+    state.panelWidths.right = clampPanelWidth(
+      'right',
+      state.panelWidths.right ?? PANEL_WIDTH_DEFAULT.right
+    );
+  }
   // Desktop panel prefs use overlay side sheets on mobile and can hide the canvas.
   if (isMobileTouchUI()) {
     state.panels.left = true;
@@ -247,7 +292,128 @@ function loadPanelState() {
 }
 
 function savePanelState() {
-  sessionStorage.setItem(PANELS_STORAGE_KEY, JSON.stringify(state.panels));
+  sessionStorage.setItem(
+    PANELS_STORAGE_KEY,
+    JSON.stringify({
+      left: state.panels.left,
+      right: state.panels.right,
+      widths: state.panelWidths,
+      splits: state.panelSplits,
+    })
+  );
+}
+
+function applyPanelWidths() {
+  const app = $('.app');
+  if (!app || isMobileTouchUI()) return;
+  app.style.setProperty('--panel-left-width', `${state.panelWidths.left}px`);
+  app.style.setProperty('--panel-right-width', `${state.panelWidths.right}px`);
+}
+
+function applyPanelSplits() {
+  if (isMobileTouchUI()) return;
+  document.querySelectorAll('.panel-split').forEach((split) => {
+    const id = split.dataset.splitId;
+    if (!id) return;
+    const splitter = split.querySelector('.panel-splitter');
+    const panes = split.querySelectorAll('.panel-pane');
+    const topPane = panes[0];
+    const bottomPane = panes[1];
+    if (!splitter || !topPane || !bottomPane) return;
+    const ratio =
+      state.panelSplits[id] ?? PANEL_SPLIT_DEFAULT[id] ?? 0.6;
+    const total = split.clientHeight - splitter.offsetHeight;
+    if (total <= PANEL_SPLIT_MIN_PX * 2) return;
+    let topH = Math.round(total * ratio);
+    topH = Math.max(
+      PANEL_SPLIT_MIN_PX,
+      Math.min(total - PANEL_SPLIT_MIN_PX, topH)
+    );
+    topPane.style.flex = `0 0 ${topH}px`;
+    bottomPane.style.flex = '1 1 0';
+  });
+}
+
+function clampPanelWidth(side, width) {
+  const min = PANEL_WIDTH_MIN[side];
+  const max = Math.min(PANEL_WIDTH_MAX[side], window.innerWidth * 0.45);
+  return Math.round(Math.max(min, Math.min(max, width)));
+}
+
+function bindPanelResizers() {
+  if (isMobileTouchUI()) return;
+
+  document.querySelectorAll('.panel-edge-resize').forEach((handle) => {
+    handle.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const side = handle.dataset.edge;
+      if (side !== 'left' && side !== 'right') return;
+      const startX = e.clientX;
+      const startW = state.panelWidths[side] ?? PANEL_WIDTH_DEFAULT[side];
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add('is-dragging');
+      document.body.classList.add('is-panel-resizing');
+      const onMove = (ev) => {
+        const delta = side === 'left' ? ev.clientX - startX : startX - ev.clientX;
+        state.panelWidths[side] = clampPanelWidth(side, startW + delta);
+        applyPanelWidths();
+        resizeCanvas();
+      };
+      const onEnd = (ev) => {
+        handle.releasePointerCapture(ev.pointerId);
+        handle.classList.remove('is-dragging');
+        document.body.classList.remove('is-panel-resizing');
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onEnd);
+        handle.removeEventListener('pointercancel', onEnd);
+        savePanelState();
+      };
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onEnd);
+      handle.addEventListener('pointercancel', onEnd);
+    });
+  });
+
+  document.querySelectorAll('.panel-splitter').forEach((splitter) => {
+    splitter.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const splitId = splitter.dataset.splitId;
+      const split = splitter.closest('.panel-split');
+      const panes = split?.querySelectorAll('.panel-pane');
+      const topPane = panes?.[0];
+      const bottomPane = panes?.[1];
+      if (!splitId || !split || !topPane || !bottomPane) return;
+      const startY = e.clientY;
+      const startTopH = topPane.offsetHeight;
+      splitter.setPointerCapture(e.pointerId);
+      splitter.classList.add('is-dragging');
+      document.body.classList.add('is-split-resizing');
+      const onMove = (ev) => {
+        const total = split.clientHeight - splitter.offsetHeight;
+        if (total <= PANEL_SPLIT_MIN_PX * 2) return;
+        let topH = startTopH + (ev.clientY - startY);
+        topH = Math.max(
+          PANEL_SPLIT_MIN_PX,
+          Math.min(total - PANEL_SPLIT_MIN_PX, topH)
+        );
+        topPane.style.flex = `0 0 ${topH}px`;
+        bottomPane.style.flex = '1 1 0';
+        state.panelSplits[splitId] = topH / total;
+      };
+      const onEnd = (ev) => {
+        splitter.releasePointerCapture(ev.pointerId);
+        splitter.classList.remove('is-dragging');
+        document.body.classList.remove('is-split-resizing');
+        splitter.removeEventListener('pointermove', onMove);
+        splitter.removeEventListener('pointerup', onEnd);
+        splitter.removeEventListener('pointercancel', onEnd);
+        savePanelState();
+      };
+      splitter.addEventListener('pointermove', onMove);
+      splitter.addEventListener('pointerup', onEnd);
+      splitter.addEventListener('pointercancel', onEnd);
+    });
+  });
 }
 
 function applyPanelState() {
@@ -261,6 +427,8 @@ function applyPanelState() {
     $(`#panel-toggle-${side}`)?.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     $(`#btn-panel-${side}`)?.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
   });
+  applyPanelWidths();
+  applyPanelSplits();
   resizeCanvas();
 }
 
@@ -698,6 +866,336 @@ function hideWallLengthTip() {
   tip.setAttribute('aria-hidden', 'true');
 }
 
+function hideElementHoverCard() {
+  if (elementHoverHideTimer) {
+    clearTimeout(elementHoverHideTimer);
+    elementHoverHideTimer = null;
+  }
+  elementHoverPin = null;
+  pointerOverHoverCard = false;
+  const card = $('#element-hover-card');
+  if (!card) return;
+  card.classList.add('hidden');
+  card.setAttribute('aria-hidden', 'true');
+}
+
+function cancelElementHoverHide() {
+  if (elementHoverHideTimer) {
+    clearTimeout(elementHoverHideTimer);
+    elementHoverHideTimer = null;
+  }
+}
+
+function scheduleElementHoverHide() {
+  cancelElementHoverHide();
+  elementHoverHideTimer = setTimeout(() => {
+    elementHoverHideTimer = null;
+    if (!pointerOverHoverCard) hideElementHoverCard();
+  }, 280);
+}
+
+function isSameHoverPin(kind, id) {
+  return elementHoverPin?.kind === kind && elementHoverPin?.id === id;
+}
+
+function positionElementHoverCard(evt) {
+  const card = $('#element-hover-card');
+  if (!card) return;
+  const margin = 12;
+  let left = evt.clientX + margin;
+  let top = evt.clientY + margin;
+  card.style.left = `${left}px`;
+  card.style.top = `${top}px`;
+  requestAnimationFrame(() => {
+    const rect = card.getBoundingClientRect();
+    const pad = 8;
+    if (rect.right > window.innerWidth - pad) {
+      left = Math.max(pad, window.innerWidth - rect.width - pad);
+      card.style.left = `${left}px`;
+    }
+    if (rect.bottom > window.innerHeight - pad) {
+      top = Math.max(pad, window.innerHeight - rect.height - pad);
+      card.style.top = `${top}px`;
+    }
+  });
+}
+
+function populateElementHoverCard(entity) {
+  const card = $('#element-hover-card');
+  if (!card) return;
+  const img = card.querySelector('.element-hover-card__image');
+  const notesEl = card.querySelector('.element-hover-card__notes');
+  const linkEl = card.querySelector('.element-hover-card__link');
+
+  if (entity.featuredImage && img) {
+    img.src = entity.featuredImage;
+    img.classList.remove('hidden');
+  } else if (img) {
+    img.removeAttribute('src');
+    img.classList.add('hidden');
+  }
+
+  if (notesEl) {
+    const notesHtml = renderNotesForDisplay(entity.notes || '');
+    notesEl.innerHTML = notesHtml;
+    notesEl.style.display = notesHtml ? '' : 'none';
+  }
+
+  const url = entity.url?.trim();
+  if (linkEl) {
+    if (url) {
+      linkEl.href = url;
+      linkEl.textContent = url;
+      linkEl.classList.remove('hidden');
+    } else {
+      linkEl.removeAttribute('href');
+      linkEl.textContent = '';
+      linkEl.classList.add('hidden');
+    }
+  }
+}
+
+function hideCanvasHoverTips() {
+  hideWallLengthTip();
+  hideElementHoverCard();
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+const NOTES_ALLOWED_TAGS = new Set([
+  'P',
+  'BR',
+  'STRONG',
+  'B',
+  'EM',
+  'I',
+  'U',
+  'UL',
+  'OL',
+  'LI',
+  'H3',
+  'H4',
+  'A',
+  'DIV',
+]);
+
+function sanitizeNotesHtml(html) {
+  if (!html?.trim()) return '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const clean = (node) => {
+    let child = node.firstChild;
+    while (child) {
+      const next = child.nextSibling;
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        if (!NOTES_ALLOWED_TAGS.has(child.tagName)) {
+          while (child.firstChild) node.insertBefore(child.firstChild, child);
+          node.removeChild(child);
+        } else {
+          if (child.tagName === 'A') {
+            const href = child.getAttribute('href') || '';
+            [...child.attributes].forEach((attr) => child.removeAttribute(attr.name));
+            if (/^https?:\/\//i.test(href)) {
+              child.setAttribute('href', href);
+              child.setAttribute('target', '_blank');
+              child.setAttribute('rel', 'noopener noreferrer');
+            }
+          } else {
+            [...child.attributes].forEach((attr) => child.removeAttribute(attr.name));
+          }
+          clean(child);
+        }
+      }
+      child = next;
+    }
+  };
+  clean(doc.body);
+  return doc.body.innerHTML;
+}
+
+function normalizeNotesHtml(html) {
+  const clean = sanitizeNotesHtml(html);
+  const probe = document.createElement('div');
+  probe.innerHTML = clean;
+  return probe.textContent?.trim() ? clean : '';
+}
+
+/** Legacy markdown notes saved before WYSIWYG. */
+function renderLegacyMarkdownNotes(text) {
+  if (!text?.trim()) return '';
+  let html = escapeHtml(text.trim());
+  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^# (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  html = html.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    (_, label, url) =>
+      `<a href="${/^https?:\/\//i.test(url) ? escapeHtml(url) : '#'}" target="_blank" rel="noopener noreferrer">${label}</a>`
+  );
+  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, (block) => `<ul>${block}</ul>`);
+  return html
+    .split(/\n\n+/)
+    .map((block) => {
+      if (/^<(h[34]|ul)/.test(block)) return block;
+      return `<p>${block.replace(/\n/g, '<br>')}</p>`;
+    })
+    .join('');
+}
+
+function notesLooksLikeHtml(notes) {
+  return /<[a-z][\s\S]*>/i.test(notes);
+}
+
+function renderNotesForDisplay(notes) {
+  if (!notes?.trim()) return '';
+  const html = notesLooksLikeHtml(notes)
+    ? notes
+    : renderLegacyMarkdownNotes(notes);
+  return normalizeNotesHtml(html);
+}
+
+function notesHasContent(notes) {
+  return Boolean(renderNotesForDisplay(notes));
+}
+
+function entityHasMeta(entity) {
+  return Boolean(
+    notesHasContent(entity?.notes) || entity?.url?.trim() || entity?.featuredImage
+  );
+}
+
+function showElementHoverCard(evt, entity, kind, id) {
+  const card = $('#element-hover-card');
+  if (!card || !entityHasMeta(entity)) {
+    hideElementHoverCard();
+    return;
+  }
+  cancelElementHoverHide();
+  const samePin = isSameHoverPin(kind, id);
+  if (!samePin) {
+    elementHoverPin = { kind, id };
+    populateElementHoverCard(entity);
+    positionElementHoverCard(evt);
+  }
+  card.classList.remove('hidden');
+  card.setAttribute('aria-hidden', 'false');
+}
+
+function entityMetaFieldsHtml(entity) {
+  const url = escapeHtml(entity.url || '');
+  const imgSrc = entity.featuredImage || '';
+  const imgPreview = imgSrc
+    ? `<img class="featured-image-preview" id="prop-img-preview" src="${imgSrc}" alt="">`
+    : '';
+  const removeBtn = imgSrc
+    ? '<button type="button" class="btn" id="prop-img-remove">Remove</button>'
+    : '';
+  return `
+    <div class="prop-section">
+      <p class="prop-section-title">Notes &amp; link</p>
+      <div class="wysiwyg-field">
+        <span class="field-label">Notes</span>
+        <div class="wysiwyg-toolbar" role="toolbar" aria-label="Notes formatting">
+          <button type="button" class="wysiwyg-btn" data-cmd="bold" title="Bold"><b>B</b></button>
+          <button type="button" class="wysiwyg-btn" data-cmd="italic" title="Italic"><i>I</i></button>
+          <button type="button" class="wysiwyg-btn" data-cmd="underline" title="Underline"><u>U</u></button>
+          <button type="button" class="wysiwyg-btn" data-cmd="insertUnorderedList" title="Bullet list">•</button>
+          <button type="button" class="wysiwyg-btn" data-cmd="link" title="Insert link">Link</button>
+        </div>
+        <div class="wysiwyg-editor" id="prop-notes" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Add notes about this piece…"></div>
+      </div>
+      <label>Link<input type="url" id="prop-url" value="${url}" placeholder="https://example.com/product"></label>
+      <div class="featured-image-field">
+        <span class="field-label">Featured image</span>
+        ${imgPreview}
+        <div class="featured-image-actions">
+          <button type="button" class="btn" id="prop-img-upload">${imgSrc ? 'Replace' : 'Upload'}…</button>
+          ${removeBtn}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function bindWysiwygEditor(editor, onCommit) {
+  if (!editor) return;
+  const toolbar = editor.closest('.wysiwyg-field')?.querySelector('.wysiwyg-toolbar');
+  toolbar?.querySelectorAll('.wysiwyg-btn').forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => {
+      editor.focus();
+      const cmd = btn.dataset.cmd;
+      if (cmd === 'link') {
+        const url = window.prompt('Link URL', 'https://');
+        if (url?.trim()) document.execCommand('createLink', false, url.trim());
+        return;
+      }
+      document.execCommand(cmd, false, null);
+    });
+  });
+  editor.addEventListener('blur', () => {
+    const clean = normalizeNotesHtml(editor.innerHTML);
+    if (editor.innerHTML !== clean) editor.innerHTML = clean;
+    onCommit(clean);
+  });
+}
+
+function bindEntityMetaFields(entity, kind, applyFn) {
+  const editor = $('#prop-notes');
+  if (editor) {
+    const raw = entity.notes || '';
+    editor.innerHTML = renderNotesForDisplay(raw);
+    bindWysiwygEditor(editor, (html) => {
+      entity.notes = html;
+      applyFn();
+    });
+  }
+  $('#prop-url')?.addEventListener('change', (e) => {
+    entity.url = e.target.value.trim();
+    applyFn();
+  });
+  $('#prop-img-upload')?.addEventListener('click', () => {
+    featuredImageTarget = { kind, id: entity.id };
+    $('#featured-image-file')?.click();
+  });
+  $('#prop-img-remove')?.addEventListener('click', () => {
+    delete entity.featuredImage;
+    applyFn();
+    renderProperties();
+  });
+}
+
+function loadFeaturedImageForEntity(entity, file) {
+  if (!file?.type?.startsWith('image/')) {
+    toast('Use a PNG or JPG image');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    const img = new Image();
+    img.onload = () => {
+      entity.featuredImage = dataUrl;
+      pushHistory();
+      render();
+      renderProperties();
+      toast('Featured image added');
+    };
+    img.onerror = () => toast('Could not load image');
+    img.src = dataUrl;
+  };
+  reader.onerror = () => toast('Could not read file');
+  reader.readAsDataURL(file);
+}
+
 function updateWallLengthTip(evt, wallId) {
   const tip = $('#wall-length-tip');
   if (!tip) return;
@@ -719,8 +1217,21 @@ function updateWallLengthTip(evt, wallId) {
 
 function updateWallHoverFromPointer(evt) {
   const hit = hitTest(evt);
-  if (hit?.kind === 'wall') updateWallLengthTip(evt, hit.id);
-  else hideWallLengthTip();
+  if (hit?.kind === 'wall') {
+    hideElementHoverCard();
+    updateWallLengthTip(evt, hit.id);
+    return;
+  }
+  hideWallLengthTip();
+  if (hit?.kind === 'item' || hit?.kind === 'light') {
+    const entity = hit.kind === 'item' ? getItem(hit.id) : getLight(hit.id);
+    if (entity && entityHasMeta(entity)) {
+      showElementHoverCard(evt, entity, hit.kind, hit.id);
+      return;
+    }
+  }
+  if (elementHoverPin) scheduleElementHoverHide();
+  else hideElementHoverCard();
 }
 
 function pointOnWall(w, t) {
@@ -1461,6 +1972,55 @@ function refreshLightingPreview() {
   syncLightingCanvas();
 }
 
+/**
+ * Draw walls (and openings) above the lightmap as a blue outline so the floor
+ * plan stays readable in lighting preview, without the lightmap's wall-occlusion
+ * band looking like a glow around each wall.
+ */
+function renderLightingStructureOverlay(svg) {
+  if (!state.showLighting || !(state.layout.lights || []).length) return;
+
+  const g = el('g', { class: 'lighting-wall-overlay' });
+
+  for (const w of state.layout.walls || []) {
+    const p1 = worldToScreen(w.x1, w.y1);
+    const p2 = worldToScreen(w.x2, w.y2);
+    g.appendChild(
+      el('line', {
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+        class: `wall-overlay-line ${w.exterior ? 'exterior' : ''}`,
+      })
+    );
+  }
+
+  for (const o of state.layout.openings || []) {
+    const w = getWall(o.wallId);
+    if (!w) continue;
+    const len = wallLength(w);
+    if (!len) continue;
+    const hw = (o.width || 3) / 2 / len;
+    const t0 = Math.max(0, o.t - hw);
+    const t1 = Math.min(1, o.t + hw);
+    const a = worldToScreen(w.x1 + (w.x2 - w.x1) * t0, w.y1 + (w.y2 - w.y1) * t0);
+    const b = worldToScreen(w.x1 + (w.x2 - w.x1) * t1, w.y1 + (w.y2 - w.y1) * t1);
+    g.appendChild(
+      el('line', {
+        x1: a.x,
+        y1: a.y,
+        x2: b.x,
+        y2: b.y,
+        class: `opening-overlay opening-overlay-${o.kind}`,
+      })
+    );
+  }
+
+  // Above the lightmap but beneath fixtures/labels already in this SVG.
+  svg.insertBefore(g, svg.firstChild);
+}
+
 function renderLightingRegionOverlay(svg) {
   if (!state.showLighting || state.mode !== 'furnish') return;
   const lights = state.layout.lights || [];
@@ -1732,6 +2292,7 @@ function render() {
 
   sync.renderPeers(svg, worldToScreen);
   renderItemSelectionOverlay(svgItems);
+  renderLightingStructureOverlay(svg);
   renderLightingRegionOverlay(svg);
 
   const bgNote = getBackgroundImage()?.src ? ' · trace image' : '';
@@ -1958,6 +2519,7 @@ function renderProperties() {
         <button type="button" class="btn" id="prop-forward" title="Bring forward">↑ layer</button>
         <button type="button" class="btn" id="prop-back" title="Send backward">↓ layer</button>
       </div>
+      ${entityMetaFieldsHtml(light)}
       <button type="button" class="btn" id="prop-dup">Duplicate</button>
       <button type="button" class="btn" id="prop-delete">Delete</button>
     `;
@@ -2010,6 +2572,7 @@ function renderProperties() {
     });
     $('#prop-forward')?.addEventListener('click', () => bringDrawableForward('light', light.id));
     $('#prop-back')?.addEventListener('click', () => sendDrawableBackward('light', light.id));
+    bindEntityMetaFields(light, 'light', () => applyLight());
     $('#prop-dup')?.addEventListener('click', duplicateSelected);
     $('#prop-delete')?.addEventListener('click', deleteSelected);
     return;
@@ -2031,6 +2594,7 @@ function renderProperties() {
         <label>Depth (ft)<input type="number" id="prop-h" value="${item.h}" step="0.25" min="0.5"></label>
       </div>
       <label>Layer (z)<input type="number" id="prop-z" value="${item.z ?? 0}" step="1"></label>
+      ${entityMetaFieldsHtml(item)}
       <button type="button" class="btn" id="prop-rotate">Rotate 90°</button>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
         <button type="button" class="btn" id="prop-forward" title="Bring forward">↑ layer</button>
@@ -2050,6 +2614,10 @@ function renderProperties() {
       });
     });
     $('#prop-rotate')?.addEventListener('click', () => rotateSelected(90));
+    bindEntityMetaFields(item, 'item', () => {
+      pushHistory();
+      render();
+    });
     $('#prop-forward')?.addEventListener('click', () => bringItemForward(item.id));
     $('#prop-back')?.addEventListener('click', () => sendItemBackward(item.id));
     $('#prop-dup')?.addEventListener('click', duplicateSelected);
@@ -2451,7 +3019,7 @@ function hitTest(evt) {
   /** @type {ReturnType<typeof hitTestFromElement>[]} */
   const hits = [];
   for (const el of stack) {
-    if (el.id === 'lighting-canvas' || el.tagName === 'CANVAS') continue;
+    if (el.id === 'lighting-canvas' || el.id === 'lighting-canvas-gl' || el.tagName === 'CANVAS') continue;
     const hit = hitTestFromElement(el);
     if (hit) hits.push(hit);
   }
@@ -2482,7 +3050,7 @@ function startPan(evt) {
 
 function onPointerDown(evt) {
   const svg = canvas();
-  hideWallLengthTip();
+  hideCanvasHoverTips();
   // Block native text selection so drag/pan/select handlers receive pointer moves.
   if (evt.button === 0 || evt.button === 1) evt.preventDefault();
 
@@ -2801,7 +3369,7 @@ function onPointerMove(evt) {
     updateWallHoverFromPointer(evt);
     return;
   }
-  hideWallLengthTip();
+  hideCanvasHoverTips();
   const pt = getSvgPoint(evt);
   const dragStart = state.drag.start;
   const dx = dragStart ? pt.x - dragStart.x : 0;
@@ -3286,7 +3854,7 @@ function buildCatalog() {
 
 function bindHotkeys() {
   document.addEventListener('keydown', (e) => {
-    if (e.target.matches('input, textarea, select')) return;
+    if (isTextEditingTarget(e.target)) return;
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key === 's') {
       e.preventDefault();
@@ -3371,6 +3939,24 @@ function bindToolbarMore() {
     btn.addEventListener('click', close);
   });
 
+  const hwAccel = $('#setting-lighting-hw-accel');
+  if (hwAccel) {
+    const settings = loadLightingSettings();
+    hwAccel.checked = settings.lightingHardwareAccel;
+    setLightingHardwareAccel(settings.lightingHardwareAccel);
+    hwAccel.addEventListener('change', () => {
+      const enabled = hwAccel.checked;
+      saveLightingSettings({ lightingHardwareAccel: enabled });
+      setLightingHardwareAccel(enabled);
+      toast(
+        enabled
+          ? 'Hardware-accelerated lighting on (WebGL2)'
+          : 'Hardware-accelerated lighting off (CPU)'
+      );
+    });
+    hwAccel.addEventListener('click', (e) => e.stopPropagation());
+  }
+
   document.addEventListener('click', (e) => {
     if (!wrap.contains(e.target)) close();
   });
@@ -3427,8 +4013,19 @@ function bindUI() {
     if (file) loadBackgroundImageFile(file);
     e.target.value = '';
   });
+  $('#featured-image-file')?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !featuredImageTarget) return;
+    const entity =
+      featuredImageTarget.kind === 'item'
+        ? getItem(featuredImageTarget.id)
+        : getLight(featuredImageTarget.id);
+    featuredImageTarget = null;
+    if (entity) loadFeaturedImageForEntity(entity, file);
+  });
   document.addEventListener('paste', (e) => {
-    if (e.target.matches('input, textarea')) return;
+    if (isTextEditingTarget(e.target)) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
@@ -3480,6 +4077,7 @@ function bindUI() {
   };
   bindPanelToggle('left');
   bindPanelToggle('right');
+  bindPanelResizers();
 
   const wrap = $('.canvas-wrap');
   const svg = canvas();
@@ -3487,7 +4085,19 @@ function bindUI() {
   wrap?.addEventListener('selectstart', blockSelect);
   wrap?.addEventListener('pointerdown', onPointerDown);
   wrap?.addEventListener('pointermove', onPointerMove);
-  wrap?.addEventListener('pointerleave', hideWallLengthTip);
+  wrap?.addEventListener('pointerleave', () => {
+    hideWallLengthTip();
+    scheduleElementHoverHide();
+  });
+  const hoverCard = $('#element-hover-card');
+  hoverCard?.addEventListener('pointerenter', () => {
+    pointerOverHoverCard = true;
+    cancelElementHoverHide();
+  });
+  hoverCard?.addEventListener('pointerleave', () => {
+    pointerOverHoverCard = false;
+    scheduleElementHoverHide();
+  });
   wrap?.addEventListener('pointerup', onPointerUp);
   wrap?.addEventListener('pointercancel', onPointerUp);
   wrap?.addEventListener('wheel', onWheel, { passive: false });
@@ -3609,8 +4219,14 @@ async function init() {
   refreshSessionsPanel();
   applyPanelState();
   ensureMobileLayout();
-  requestAnimationFrame(() => ensureMobileLayout());
-  window.addEventListener('resize', resizeCanvas);
+  requestAnimationFrame(() => {
+    applyPanelSplits();
+    ensureMobileLayout();
+  });
+  window.addEventListener('resize', () => {
+    resizeCanvas();
+    applyPanelSplits();
+  });
   window.matchMedia(MOBILE_MQ).addEventListener('change', (e) => {
     if (e.matches) ensureMobileLayout();
   });

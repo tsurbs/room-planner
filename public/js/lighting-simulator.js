@@ -4,10 +4,10 @@
 
 import {
   applyInteriorMask,
-  applyWallExclusion,
   buildInteriorMask,
   buildWallOcclusionGrid,
   diskSamplePoints,
+  dilateMask,
   findInteriorSeed,
   worldLineOfSight,
 } from './lighting-geometry.js';
@@ -99,6 +99,10 @@ export function computeLightmap(layout, region, options = {}) {
     interiorSeed.x,
     interiorSeed.y
   );
+  // Grow the interior across wall cells so light is computed and kept right up
+  // to the walls (no dark moat). Walls still block light via LOS + thickness.
+  const wallSpan = Math.max(2, Math.round(cellsPerFt * 0.6));
+  const keepMask = dilateMask(interiorMask, gridW, gridH, wallSpan);
   const lights = layout.lights || [];
 
   const lightData = lights.map((light, li) => ({
@@ -120,7 +124,7 @@ export function computeLightmap(layout, region, options = {}) {
       let lb = ambient * 0.07;
 
       const cellIdx = gy * gridW + gx;
-      if (!interiorMask[cellIdx]) {
+      if (!keepMask[cellIdx]) {
         const idx = cellIdx * 4;
         data[idx] = 0;
         data[idx + 1] = 0;
@@ -167,12 +171,10 @@ export function computeLightmap(layout, region, options = {}) {
     }
   }
 
-  applyWallExclusion(data, occGrid, gridW, gridH, 2);
   if (qualityKey !== 'draft') {
     blurLightmap(data, gridW, gridH);
   }
-  applyWallExclusion(data, occGrid, gridW, gridH, 2);
-  applyInteriorMask(data, interiorMask, gridW, gridH);
+  applyInteriorMask(data, keepMask, gridW, gridH);
 
   return {
     width: gridW,

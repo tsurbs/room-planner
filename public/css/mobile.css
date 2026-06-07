@@ -210,6 +210,29 @@ html {
   display: flex;
 }
 
+.panel-edge-resize,
+.panel-splitter {
+  display: none;
+}
+
+.panel-split {
+  display: block;
+  overflow-y: auto;
+}
+
+.panel-pane,
+.panel-pane--grow {
+  flex: none;
+  height: auto;
+  overflow: visible;
+}
+
+.panel-pane .panel-scroll {
+  flex: none;
+  overflow: visible;
+  max-height: none;
+}
+
 .app.left-collapsed .panel-left .panel-body,
 .app.right-collapsed .panel-right .panel-body {
   display: flex;

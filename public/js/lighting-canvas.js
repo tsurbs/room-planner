@@ -1,14 +1,21 @@
 /**
  * Canvas overlay for computed floor lightmap, synced to SVG pan/zoom.
+ * Uses WebGL2 shadow maps when hardware acceleration is enabled; otherwise CPU worker.
  */
 
 import { DEFAULT_LIGHT_QUALITY } from './lighting.js';
+import { isLightingHardwareAccelEnabled } from './lighting-settings.js';
+import { createLightingGpu } from './lighting-gl.js';
 
 let worker = null;
 let jobId = 0;
 let pendingJob = null;
 let debounceTimer = null;
 let lastResult = null;
+/** @type {import('./lighting-gl.js').LightingGpu | null} */
+let gpu = null;
+let gpuFailed = false;
+let hardwareAccel = isLightingHardwareAccelEnabled();
 
 /** @type {((pan: {x:number,y:number}, zoom: number, pxPerFt: number) => void) | null} */
 let viewSync = null;
@@ -16,9 +23,22 @@ let viewSync = null;
 /** @type {(() => { layout: object, region: object, show: boolean }) | null} */
 let stateProvider = null;
 
-let quality = DEFAULT_LIGHT_QUALITY;
+/** Quality the user picked in Properties — what we render at rest. */
+let userQuality = DEFAULT_LIGHT_QUALITY;
+/** True while an object/wall/region is being dragged. */
+let interacting = false;
+let rafHandle = 0;
 
 const DEBOUNCE_MS = 120;
+
+/**
+ * Quality to actually compute at right now.
+ * GPU is fast enough to keep full quality live during drags; the CPU path
+ * drops to draft while interacting to stay responsive.
+ */
+function effectiveQuality() {
+  return interacting && !useGpuPath() ? 'draft' : userQuality;
+}
 
 /** Layout fields used by lightmap compute — items are intentionally omitted. */
 function lightingLayoutSlice(layout) {
@@ -29,6 +49,34 @@ function lightingLayoutSlice(layout) {
     bounds: layout.bounds,
     lightingRegion: layout.lightingRegion,
   };
+}
+
+function useGpuPath() {
+  return hardwareAccel && !gpuFailed;
+}
+
+function canvas2dEl() {
+  return document.getElementById('lighting-canvas');
+}
+
+function canvasGlEl() {
+  return document.getElementById('lighting-canvas-gl');
+}
+
+function ensureGpu() {
+  if (!useGpuPath()) return null;
+  if (gpu?.isReady()) return gpu;
+  const c = canvasGlEl();
+  if (!c) return null;
+  gpu = createLightingGpu(c);
+  if (!gpu.isReady()) {
+    gpu.destroy();
+    gpu = null;
+    gpuFailed = true;
+    console.warn('Lighting GPU unavailable — using CPU lightmap');
+    return null;
+  }
+  return gpu;
 }
 
 function getWorker() {
@@ -80,6 +128,10 @@ function scheduleCompute(immediate = false) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
+  if (rafHandle) {
+    cancelAnimationFrame(rafHandle);
+    rafHandle = 0;
+  }
   const run = () => {
     const ctx = stateProvider?.();
     if (!ctx?.show || !ctx.layout || !ctx.region) {
@@ -94,53 +146,94 @@ function scheduleCompute(immediate = false) {
 
     const id = ++jobId;
     pendingJob = { id };
-    const options = { quality, seed: id * 0.013 };
+    const options = { quality: effectiveQuality(), seed: id * 0.013 };
+    const layoutSlice = structuredClone(lightingLayoutSlice(ctx.layout));
+    const region = { ...ctx.region };
+
+    if (useGpuPath()) {
+      const renderer = ensureGpu();
+      if (renderer) {
+        try {
+          const ok = renderer.compute(layoutSlice, region, options);
+          if (pendingJob?.id !== id) return;
+          pendingJob = null;
+          if (ok) {
+            lastResult = null;
+            drawLightmap();
+            return;
+          }
+        } catch (err) {
+          console.warn('Lighting GPU compute failed, falling back to CPU', err);
+          gpuFailed = true;
+          if (gpu) {
+            gpu.destroy();
+            gpu = null;
+          }
+        }
+      }
+    }
 
     const w = getWorker();
-    const layoutSlice = structuredClone(lightingLayoutSlice(ctx.layout));
     if (w) {
-      w.postMessage({
-        id,
-        layout: layoutSlice,
-        region: { ...ctx.region },
-        options,
-      });
+      w.postMessage({ id, layout: layoutSlice, region, options });
     } else {
-      computeOnMainThread(layoutSlice, ctx.region, options, id);
+      computeOnMainThread(layoutSlice, region, options, id);
     }
   };
 
-  if (immediate) run();
-  else debounceTimer = setTimeout(run, DEBOUNCE_MS);
-}
-
-function canvasEl() {
-  return document.getElementById('lighting-canvas');
+  if (immediate) {
+    run();
+  } else if (interacting && useGpuPath()) {
+    // GPU recompute is sub-millisecond — coalesce to one update per frame so
+    // dragging a light/wall updates the lightmap in real time.
+    rafHandle = requestAnimationFrame(() => {
+      rafHandle = 0;
+      run();
+    });
+  } else {
+    debounceTimer = setTimeout(run, DEBOUNCE_MS);
+  }
 }
 
 function hideCanvas() {
-  const c = canvasEl();
-  if (c) c.style.visibility = 'hidden';
+  const c2d = canvas2dEl();
+  const cgl = canvasGlEl();
+  if (c2d) c2d.style.visibility = 'hidden';
+  if (cgl) cgl.style.visibility = 'hidden';
   lastResult = null;
 }
 
 function drawLightmap() {
-  const c = canvasEl();
-  if (!c || !lastResult || !viewSync) return;
+  if (!viewSync) return;
 
   const { pan, zoom, pxPerFt } = viewSync();
+  const c2d = canvas2dEl();
+  const cgl = canvasGlEl();
+
+  if (useGpuPath() && gpu?.isReady() && gpu.meta) {
+    if (c2d) c2d.style.visibility = 'hidden';
+    if (cgl) {
+      gpu.draw(pan, zoom, pxPerFt);
+      cgl.style.visibility = 'visible';
+    }
+    return;
+  }
+
+  if (!c2d || !lastResult) return;
+  if (cgl) cgl.style.visibility = 'hidden';
+
   const { width, height, cellsPerFt, regionX, regionY, data } = lastResult;
 
-  const wrap = c.parentElement;
+  const wrap = c2d.parentElement;
   if (!wrap) return;
   const wrapW = wrap.clientWidth;
   const wrapH = wrap.clientHeight;
-  if (c.width !== wrapW || c.height !== wrapH) {
-    c.width = wrapW;
-    c.height = wrapH;
+  if (c2d.width !== wrapW || c2d.height !== wrapH) {
+    c2d.width = wrapW;
+    c2d.height = wrapH;
   }
 
-  const ctx = c.getContext('2d');
+  const ctx = c2d.getContext('2d');
   if (!ctx) return;
 
   ctx.clearRect(0, 0, wrapW, wrapH);
@@ -164,7 +257,7 @@ function drawLightmap() {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(offscreen, 0, 0, width, height, destX, destY, destW, destH);
 
-  c.style.visibility = 'visible';
+  c2d.style.visibility = 'visible';
 }
 
 /** @param {() => { layout, region, show }} provider */
@@ -178,12 +271,29 @@ export function setLightingViewSync(fn) {
 }
 
 export function setLightingQuality(q) {
-  quality = q || DEFAULT_LIGHT_QUALITY;
+  userQuality = q || DEFAULT_LIGHT_QUALITY;
   invalidateLighting(true);
 }
 
 export function getLightingQuality() {
-  return quality;
+  return userQuality;
+}
+
+export function isLightingHardwareAccelOn() {
+  return hardwareAccel;
+}
+
+/** @param {boolean} enabled */
+export function setLightingHardwareAccel(enabled) {
+  const next = !!enabled;
+  if (next === hardwareAccel) return;
+  hardwareAccel = next;
+  gpuFailed = false;
+  if (!next && gpu) {
+    gpu.destroy();
+    gpu = null;
+  }
+  invalidateLighting(true);
 }
 
 /** @param {boolean} immediate */
@@ -195,16 +305,37 @@ export function syncLightingCanvas() {
   drawLightmap();
 }
 
-export function setLightingDraftMode(draft) {
-  quality = draft ? 'draft' : DEFAULT_LIGHT_QUALITY;
-  invalidateLighting(false);
+/**
+ * Toggle interactive (drag) mode. While interacting the lightmap recomputes
+ * live: full quality on the GPU path, draft quality on the CPU fallback.
+ * @param {boolean} active
+ */
+export function setLightingInteracting(active) {
+  const next = !!active;
+  if (next === interacting) return;
+  interacting = next;
+  // Recompute immediately when a drag ends so we settle on full quality at once.
+  invalidateLighting(!next);
+}
+
+/** @deprecated Back-compat alias for {@link setLightingInteracting}. */
+export function setLightingDraftMode(active) {
+  setLightingInteracting(active);
 }
 
 export function destroyLightingCanvas() {
   if (debounceTimer) clearTimeout(debounceTimer);
+  if (rafHandle) {
+    cancelAnimationFrame(rafHandle);
+    rafHandle = 0;
+  }
   if (worker) {
     worker.terminate();
     worker = null;
+  }
+  if (gpu) {
+    gpu.destroy();
+    gpu = null;
   }
   hideCanvas();
 }

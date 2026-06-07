@@ -97,6 +97,7 @@
                 <span>Trace image</span>
               </button>
               <input type="file" id="bg-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
+              <input type="file" id="featured-image-file" accept="image/png,image/jpeg,image/jpg,image/webp" hidden>
             </div>
             <div class="toolbar-menu-section" role="presentation">
               <div class="toolbar-menu-heading">File</div>
@@ -117,6 +118,13 @@
                 <span>Reset layout</span>
               </button>
             </div>
+            <div class="toolbar-menu-section" role="presentation">
+              <div class="toolbar-menu-heading">Settings</div>
+              <label class="toolbar-menu-toggle" title="Use WebGL2 shadow maps for faster lighting preview">
+                <input type="checkbox" id="setting-lighting-hw-accel" checked>
+                <span>Hardware-accelerated lighting</span>
+              </label>
+            </div>
             <div class="toolbar-menu-section toolbar-menu-section--danger" role="presentation">
               <div class="toolbar-menu-heading">Danger</div>
               <button type="button" class="btn toolbar-menu-row" id="btn-clear" role="menuitem" title="Clear floorplan — empty canvas (⌘⇧N)">
@@ -134,28 +142,36 @@
         <span class="panel-toggle-icon" aria-hidden="true"><i data-lucide="chevron-left" class="btn-icon"></i></span>
       </button>
       <div class="panel-body">
-      <h2>Catalog</h2>
-      <div class="panel-search">
-        <input type="search" id="catalog-search" placeholder="Search catalog…" autocomplete="off" aria-label="Search catalog">
+        <div class="panel-split" data-split-id="left-catalog">
+          <section class="panel-pane">
+            <h2>Catalog</h2>
+            <div class="panel-search">
+              <input type="search" id="catalog-search" placeholder="Search catalog…" autocomplete="off" aria-label="Search catalog">
+            </div>
+            <p class="panel-hint">Drag furniture or lights onto the floor</p>
+            <div id="catalog-list" class="panel-section panel-scroll"></div>
+          </section>
+          <div class="panel-splitter" data-split-id="left-catalog" role="separator" aria-orientation="horizontal" aria-label="Resize catalog and sessions"></div>
+          <section class="panel-pane panel-pane--grow">
+            <h2>Sessions</h2>
+            <div id="sessions-panel" class="panel-section panel-scroll">
+              <p class="panel-hint">Shared plans sync live in the cloud. Local copies are for backup and offline work.</p>
+              <h3 class="panel-subhead">Recent shared</h3>
+              <div id="recent-sessions-list"></div>
+              <button type="button" class="btn btn-block session-leave hidden" id="btn-leave-session" title="Stop syncing and work offline">Leave shared session</button>
+              <h3 class="panel-subhead">Restore locally</h3>
+              <div id="local-restore-list"></div>
+            </div>
+          </section>
+        </div>
       </div>
-      <p class="panel-hint">Drag furniture or lights onto the floor</p>
-      <div id="catalog-list" class="panel-section panel-scroll"></div>
-
-      <h2>Sessions</h2>
-      <div id="sessions-panel" class="panel-section panel-scroll">
-        <p class="panel-hint">Shared plans sync live in the cloud. Local copies are for backup and offline work.</p>
-        <h3 class="panel-subhead">Recent shared</h3>
-        <div id="recent-sessions-list"></div>
-        <button type="button" class="btn btn-block session-leave hidden" id="btn-leave-session" title="Stop syncing and work offline">Leave shared session</button>
-        <h3 class="panel-subhead">Restore locally</h3>
-        <div id="local-restore-list"></div>
-      </div>
-      </div>
+      <div class="panel-edge-resize" data-edge="left" role="separator" aria-orientation="vertical" aria-label="Resize catalog panel"></div>
     </aside>
 
     <main class="canvas-wrap">
       <svg id="floor-canvas-base" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
       <svg id="floor-canvas-items" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
+      <canvas id="lighting-canvas-gl" aria-hidden="true"></canvas>
       <canvas id="lighting-canvas" aria-hidden="true"></canvas>
       <svg id="floor-canvas" xmlns="http://www.w3.org/2000/svg" aria-label="Floor plan canvas"></svg>
     </main>
@@ -164,25 +180,32 @@
       <button type="button" class="panel-toggle" id="panel-toggle-right" title="Toggle properties (})" aria-label="Toggle properties" aria-expanded="true">
         <span class="panel-toggle-icon" aria-hidden="true"><i data-lucide="chevron-right" class="btn-icon"></i></span>
       </button>
+      <div class="panel-edge-resize" data-edge="right" role="separator" aria-orientation="vertical" aria-label="Resize properties panel"></div>
       <div class="panel-body">
-      <h2
-        hx-get="/"
-        hx-select="#tpl-props-header"
-        hx-target="#props-header"
-        hx-swap="innerHTML"
-      >Properties</h2>
-      <div id="props-header"></div>
-      <div id="props-panel" class="panel-section panel-scroll">
-        <p class="empty-state">Select furniture, a wall, or a room label. Double-click a label to edit text.</p>
-      </div>
-
-      <h2
-        hx-get="/"
-        hx-select="#tpl-help"
-        hx-target="#help-panel"
-        hx-swap="innerHTML"
-      >Shortcuts</h2>
-      <div id="help-panel" class="panel-section panel-scroll"></div>
+        <div class="panel-split" data-split-id="right-props">
+          <section class="panel-pane">
+            <h2
+              hx-get="/"
+              hx-select="#tpl-props-header"
+              hx-target="#props-header"
+              hx-swap="innerHTML"
+            >Properties</h2>
+            <div id="props-header"></div>
+            <div id="props-panel" class="panel-section panel-scroll">
+              <p class="empty-state">Select furniture, a wall, or a room label. Double-click a label to edit text.</p>
+            </div>
+          </section>
+          <div class="panel-splitter" data-split-id="right-props" role="separator" aria-orientation="horizontal" aria-label="Resize properties and shortcuts"></div>
+          <section class="panel-pane panel-pane--grow">
+            <h2
+              hx-get="/"
+              hx-select="#tpl-help"
+              hx-target="#help-panel"
+              hx-swap="innerHTML"
+            >Shortcuts</h2>
+            <div id="help-panel" class="panel-section panel-scroll"></div>
+          </section>
+        </div>
       </div>
     </aside>
 
@@ -195,6 +218,12 @@
   </div>
 
   <div id="wall-length-tip" class="wall-length-tip hidden" aria-hidden="true"></div>
+
+  <div id="element-hover-card" class="element-hover-card hidden" aria-hidden="true">
+    <img class="element-hover-card__image hidden" alt="">
+    <div class="element-hover-card__notes"></div>
+    <a class="element-hover-card__link hidden" target="_blank" rel="noopener noreferrer"></a>
+  </div>
 
   <div id="toast" class="toast" role="status"></div>
 

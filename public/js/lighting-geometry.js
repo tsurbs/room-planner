@@ -254,4 +254,30 @@ function applyWallExclusion(data, occGrid, gridW, gridH, dilate = 2) {
   }
 }
 
-export { applyInteriorMask, applyWallExclusion };
+/**
+ * Grow a binary mask outward by `radius` cells (Chebyshev/square).
+ * Used so the lit area extends across wall cells right up to the walls,
+ * instead of leaving a dark moat where occluded cells were masked out.
+ * @returns {Uint8Array} a new dilated mask
+ */
+function dilateMask(mask, gridW, gridH, radius = 2) {
+  if (radius <= 0) return mask;
+  const out = new Uint8Array(mask.length);
+  for (let gy = 0; gy < gridH; gy++) {
+    for (let gx = 0; gx < gridW; gx++) {
+      if (!mask[gy * gridW + gx]) continue;
+      const y0 = Math.max(0, gy - radius);
+      const y1 = Math.min(gridH - 1, gy + radius);
+      const x0 = Math.max(0, gx - radius);
+      const x1 = Math.min(gridW - 1, gx + radius);
+      for (let ny = y0; ny <= y1; ny++) {
+        for (let nx = x0; nx <= x1; nx++) {
+          out[ny * gridW + nx] = 1;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+export { applyInteriorMask, applyWallExclusion, dilateMask };

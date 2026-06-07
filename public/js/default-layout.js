@@ -7,11 +7,11 @@
 export const LAYOUT_VERSION = 1;
 
 /** @typedef {{ id: string, x1: number, y1: number, x2: number, y2: number, exterior?: boolean }} Wall */
-/** @typedef {{ id: string, type: string, x: number, y: number, w: number, h: number, rotation?: number }} Item */
+/** @typedef {{ id: string, type: string, x: number, y: number, w: number, h: number, rotation?: number, notes?: string, url?: string, featuredImage?: string }} Item */
 /** @typedef {{ src: string, x: number, y: number, width: number, height: number, opacity?: number, locked?: boolean }} BackgroundImage */
 /** @typedef {{ id: string, name: string, x: number, y: number, w: number, h: number }} RoomLabel */
 /** @typedef {{ id: string, wallId: string, t: number, width: number, kind: 'door'|'window'|'sliding' }} Opening */
-/** @typedef {{ id: string, type: string, x: number, y: number, sizeFt?: number, radiusFt?: number, kelvin?: number, intensity?: number }} Light */
+/** @typedef {{ id: string, type: string, x: number, y: number, sizeFt?: number, radiusFt?: number, kelvin?: number, intensity?: number, notes?: string, url?: string, featuredImage?: string }} Light */
 
 export function createEmptyLayout() {
   return {
